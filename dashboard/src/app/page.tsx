@@ -22,7 +22,8 @@ interface PageProps {
   searchParams: Promise<{ channels?: string; performance?: string; bucket?: string }>;
 }
 
-export const revalidate = 60; // Revalidate every 60 seconds
+export const dynamic = "force-dynamic"; // Force dynamic rendering
+export const revalidate = 0; // Disable caching
 
 function getVideoPerformanceRatio(
   video: Video & { snapshots: Snapshot[] },
