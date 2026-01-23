@@ -2,15 +2,24 @@
 YouTube Competition Analysis - Main Entry Point
 
 Usage:
-    python main.py                  # Run the scheduler (main mode)
+    python main.py                  # Run the web server with scheduler (production)
     python main.py --once           # Run all jobs once (testing)
     python main.py --add-channel    # Add a channel interactively
     python main.py --list-channels  # List tracked channels
     python main.py --test           # Test connection and configuration
+    python main.py --subscribe-all  # Subscribe all channels to WebSub
 """
 
 import sys
+import asyncio
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from fastapi import FastAPI, Request, Response, Query
 from loguru import logger
+import uvicorn
+
+from src.config import Config
 
 # Configure logging
 logger.remove()  # Remove default handler
@@ -27,9 +36,204 @@ logger.add(
 )
 
 
+# Background scheduler task
+async def run_scheduler_background():
+    """Run the scheduler in the background."""
+    import time
+    import schedule
+    from src.discovery.polling import PollingDiscovery
+    from src.discovery.websub import renew_expiring_subscriptions
+    from src.scheduler.snapshot_worker import SnapshotWorker
+    from src.database.baselines import update_all_baselines_for_channel
+    from src.database.channels import get_active_channels
+
+    discovery = PollingDiscovery()
+    snapshot_worker = SnapshotWorker()
+
+    def run_discovery():
+        logger.info("Running discovery job...")
+        try:
+            summary = discovery.poll_all_channels()
+            logger.info(f"Discovery complete: {summary}")
+        except Exception as e:
+            logger.error(f"Discovery job failed: {e}")
+
+    def run_snapshot_worker():
+        logger.debug("Running snapshot worker...")
+        try:
+            summary = snapshot_worker.process_pending_snapshots()
+            if summary["processed"] > 0:
+                logger.info(f"Snapshots processed: {summary}")
+        except Exception as e:
+            logger.error(f"Snapshot worker failed: {e}")
+
+    def run_baseline_calculator():
+        logger.info("Running baseline calculator...")
+        try:
+            channels = get_active_channels()
+            for channel in channels:
+                result = update_all_baselines_for_channel(channel["channel_id"])
+                if result["updated"]:
+                    logger.info(f"Updated baselines for {channel['channel_name']}: {result['updated']}")
+        except Exception as e:
+            logger.error(f"Baseline calculator failed: {e}")
+
+    def run_completion_check():
+        try:
+            count = snapshot_worker.check_and_complete_videos()
+            if count > 0:
+                logger.info(f"Marked {count} videos as completed")
+        except Exception as e:
+            logger.error(f"Completion check failed: {e}")
+
+    def run_websub_renewal():
+        """Renew expiring WebSub subscriptions."""
+        if Config.DISCOVERY_MODE == "websub":
+            logger.info("Running WebSub renewal check...")
+            try:
+                summary = renew_expiring_subscriptions()
+                logger.info(f"WebSub renewal complete: {summary}")
+            except Exception as e:
+                logger.error(f"WebSub renewal failed: {e}")
+
+    # Set up schedules based on discovery mode
+    if Config.DISCOVERY_MODE == "polling":
+        schedule.every(Config.POLLING_INTERVAL_MINUTES).minutes.do(run_discovery)
+        logger.info(f"Polling discovery: every {Config.POLLING_INTERVAL_MINUTES} minutes")
+    else:
+        # In WebSub mode, still poll occasionally as a fallback
+        schedule.every(60).minutes.do(run_discovery)
+        logger.info("WebSub mode: fallback polling every 60 minutes")
+        # Renew subscriptions daily
+        schedule.every(24).hours.do(run_websub_renewal)
+        logger.info("WebSub renewal: every 24 hours")
+
+    schedule.every(Config.SNAPSHOT_WORKER_INTERVAL_MINUTES).minutes.do(run_snapshot_worker)
+    schedule.every(Config.BASELINE_UPDATE_HOURS).hours.do(run_baseline_calculator)
+    schedule.every(1).hours.do(run_completion_check)
+
+    logger.info(f"Snapshots: every {Config.SNAPSHOT_WORKER_INTERVAL_MINUTES} minutes")
+    logger.info(f"Baselines: every {Config.BASELINE_UPDATE_HOURS} hours")
+    logger.info(f"Completion check: every 1 hour")
+
+    # Run discovery and snapshots immediately on start
+    run_discovery()
+    run_snapshot_worker()
+
+    # Subscribe to WebSub if in websub mode
+    if Config.DISCOVERY_MODE == "websub" and Config.WEBSUB_CALLBACK_URL:
+        from src.discovery.websub import subscribe_all_channels
+        logger.info("Subscribing all channels to WebSub...")
+        summary = subscribe_all_channels()
+        logger.info(f"WebSub subscription: {summary}")
+
+    logger.info("Background scheduler started")
+
+    # Run forever
+    while True:
+        schedule.run_pending()
+        await asyncio.sleep(10)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan - start/stop background tasks."""
+    # Start background scheduler
+    scheduler_task = asyncio.create_task(run_scheduler_background())
+    logger.info("Application started")
+
+    yield
+
+    # Shutdown
+    scheduler_task.cancel()
+    try:
+        await scheduler_task
+    except asyncio.CancelledError:
+        pass
+    logger.info("Application shutdown")
+
+
+# Create FastAPI app
+app = FastAPI(
+    title="YouTube Competition Analysis",
+    description="Tracks YouTube videos and detects breakout content",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+
+@app.get("/")
+async def root():
+    """Health check endpoint."""
+    return {
+        "status": "healthy",
+        "service": "YouTube Competition Analysis",
+        "discovery_mode": Config.DISCOVERY_MODE,
+    }
+
+
+@app.get("/health")
+async def health():
+    """Health check for Railway."""
+    return {"status": "ok"}
+
+
+@app.get("/webhooks/youtube")
+async def websub_verify(
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_topic: str = Query(None, alias="hub.topic"),
+    hub_challenge: str = Query(None, alias="hub.challenge"),
+    hub_lease_seconds: Optional[str] = Query(None, alias="hub.lease_seconds"),
+):
+    """
+    Handle WebSub subscription verification.
+    YouTube hub sends this to verify we want the subscription.
+    """
+    from src.discovery.websub import WebSubHandler
+
+    logger.info(f"WebSub verification request: mode={hub_mode}, topic={hub_topic}")
+
+    if not all([hub_mode, hub_topic, hub_challenge]):
+        logger.warning("Missing required WebSub verification parameters")
+        return Response(content="Missing parameters", status_code=400)
+
+    handler = WebSubHandler()
+    result = handler.verify_subscription(
+        mode=hub_mode,
+        topic=hub_topic,
+        challenge=hub_challenge,
+        lease_seconds=hub_lease_seconds,
+    )
+
+    if result:
+        # Must return the challenge as plain text
+        return Response(content=result, media_type="text/plain", status_code=200)
+    else:
+        return Response(content="Verification failed", status_code=404)
+
+
+@app.post("/webhooks/youtube")
+async def websub_notification(request: Request):
+    """
+    Handle WebSub push notification.
+    YouTube sends this when a new video is published.
+    """
+    from src.discovery.websub import WebSubHandler
+
+    body = await request.body()
+    logger.info(f"WebSub notification received ({len(body)} bytes)")
+
+    handler = WebSubHandler()
+    summary = handler.handle_notification(body)
+
+    logger.info(f"WebSub notification processed: {summary}")
+
+    # Always return 200 to acknowledge receipt
+    return {"status": "received", "summary": summary}
+
+
 def test_connection():
     """Test Supabase and YouTube API connections."""
-    from src.config import Config
     from src.database.connection import get_client
     from src.youtube.api import YouTubeAPI
 
@@ -122,6 +326,16 @@ def add_channel_interactive():
 
     if result:
         print(f"\nChannel added successfully!")
+
+        # Subscribe to WebSub if in websub mode
+        if Config.DISCOVERY_MODE == "websub" and Config.WEBSUB_CALLBACK_URL:
+            from src.discovery.websub import WebSubSubscription
+            print("Subscribing to WebSub notifications...")
+            sub = WebSubSubscription()
+            if sub.subscribe(info["channel_id"]):
+                print("WebSub subscription requested!")
+            else:
+                print("WebSub subscription failed (will use polling fallback)")
     else:
         print(f"\nFailed to add channel.")
 
@@ -146,22 +360,6 @@ def list_channels():
         print()
 
 
-def run_scheduler():
-    """Run the main scheduler loop."""
-    from src.jobs.runner import JobRunner
-
-    print("\n=== YouTube Competition Analysis ===\n")
-    print("Starting scheduler...")
-    print("Press Ctrl+C to stop.\n")
-
-    runner = JobRunner()
-
-    try:
-        runner.run_forever()
-    except KeyboardInterrupt:
-        print("\n\nShutting down...")
-
-
 def run_once():
     """Run all jobs once (for testing)."""
     from src.jobs.runner import JobRunner
@@ -170,6 +368,43 @@ def run_once():
 
     runner = JobRunner()
     runner.run_once()
+
+
+def subscribe_all():
+    """Subscribe all channels to WebSub."""
+    from src.discovery.websub import subscribe_all_channels
+
+    if not Config.WEBSUB_CALLBACK_URL:
+        print("Error: WEBSUB_CALLBACK_URL not configured")
+        return
+
+    print("\n=== Subscribing All Channels to WebSub ===\n")
+    print(f"Callback URL: {Config.WEBSUB_CALLBACK_URL}")
+    print()
+
+    summary = subscribe_all_channels()
+
+    print(f"\nResults:")
+    print(f"  Total channels: {summary['total']}")
+    print(f"  Subscribed: {summary['subscribed']}")
+    print(f"  Failed: {summary['failed']}")
+
+
+def run_server():
+    """Run the FastAPI server."""
+    print("\n=== YouTube Competition Analysis ===\n")
+    print(f"Starting server on port {Config.PORT}...")
+    print(f"Discovery mode: {Config.DISCOVERY_MODE}")
+    if Config.DISCOVERY_MODE == "websub":
+        print(f"WebSub callback: {Config.WEBSUB_CALLBACK_URL}")
+    print()
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=Config.PORT,
+        log_level="info",
+    )
 
 
 def main():
@@ -183,8 +418,10 @@ def main():
         list_channels()
     elif "--once" in args:
         run_once()
+    elif "--subscribe-all" in args:
+        subscribe_all()
     else:
-        run_scheduler()
+        run_server()
 
 
 if __name__ == "__main__":

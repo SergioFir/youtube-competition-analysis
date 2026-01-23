@@ -246,22 +246,24 @@ youtube-tracker/
 - [x] **6.3** Create main.py entry point
 - [x] **6.4** Test: System running and collecting data
 
-### Phase 7: Production Readiness (Later)
-- [ ] **7.1** Implement WebSub subscription (`discovery/websub.py`)
-- [ ] **7.2** Implement subscription renewal job
-- [ ] **7.3** Switch from polling to WebSub
-- [ ] **7.4** Monitor for 7 days
+### Phase 7: Production Readiness
+- [x] **7.1** Implement WebSub subscription (`discovery/websub.py`)
+- [x] **7.2** Implement subscription renewal job
+- [x] **7.3** Add FastAPI web server for webhook endpoints
+- [ ] **7.4** Switch from polling to WebSub (set DISCOVERY_MODE=websub)
+- [ ] **7.5** Monitor for 7 days
 
 ---
 
 ## Part 1.5: Deployment & Dashboard (CURRENT)
 
 ### Phase 8: Deploy Tracker to Railway
-- [ ] **8.1** Add `source` column to `channel_baselines` table
-- [ ] **8.2** Create Railway account and project
-- [ ] **8.3** Configure environment variables in Railway
-- [ ] **8.4** Deploy Python tracker to Railway
-- [ ] **8.5** Verify tracker runs 24/7 and collects data
+- [x] **8.1** Add `source` column to `channel_baselines` table
+- [x] **8.2** Add channel URL resolution (accepts @handles and URLs)
+- [x] **8.3** Create GitHub repo and push code
+- [x] **8.4** Create Railway project and connect to GitHub
+- [x] **8.5** Configure environment variables in Railway
+- [x] **8.6** Verify tracker runs 24/7 and collects data
 
 ### Phase 9: Seed Data Import
 - [ ] **9.1** User provides spreadsheet with 20-30 channels + estimated 24h medians
@@ -395,6 +397,10 @@ DISCOVERY_MODE=polling  # or "websub" in production
 POLLING_INTERVAL_MINUTES=15
 SNAPSHOT_WORKER_INTERVAL_MINUTES=5
 BASELINE_UPDATE_HOURS=12
+
+# WebSub (required when DISCOVERY_MODE=websub)
+WEBSUB_CALLBACK_URL=https://creatrr.app/webhooks/youtube
+PORT=8080  # Railway sets this automatically
 ```
 
 ---
@@ -407,6 +413,7 @@ BASELINE_UPDATE_HOURS=12
 | 2024-01-16 | Part 1 implementation complete |
 | 2024-01-19 | Baseline calculation updated: now uses ANY video with snapshot at window, not just completed videos. This allows baselines to be available immediately (after min sample reached) instead of waiting 14 days. |
 | 2024-01-20 | Added Part 1.5: Deployment & Dashboard. Plan to deploy tracker to Railway, seed with VidIQ data, build Next.js dashboard. Added `source` column to baselines schema for tracking manual vs calculated data. |
+| 2024-01-23 | Implemented WebSub for real-time video notifications. Added FastAPI web server, webhook endpoints, subscription management. Domain: creatrr.app |
 
 ---
 

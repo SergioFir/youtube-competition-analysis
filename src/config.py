@@ -23,6 +23,15 @@ class Config:
     # Discovery mode: "polling" or "websub"
     DISCOVERY_MODE: str = os.getenv("DISCOVERY_MODE", "polling")
 
+    # WebSub settings
+    WEBSUB_CALLBACK_URL: str = os.getenv("WEBSUB_CALLBACK_URL", "")  # e.g., https://creatrr.app/webhooks/youtube
+    WEBSUB_HUB_URL: str = "https://pubsubhubbub.appspot.com/subscribe"
+    WEBSUB_LEASE_SECONDS: int = int(os.getenv("WEBSUB_LEASE_SECONDS", str(10 * 24 * 60 * 60)))  # 10 days default
+    WEBSUB_RENEWAL_BUFFER_HOURS: int = 24  # Renew 24 hours before expiry
+
+    # Server settings
+    PORT: int = int(os.getenv("PORT", "8080"))
+
     # Intervals
     POLLING_INTERVAL_MINUTES: int = int(os.getenv("POLLING_INTERVAL_MINUTES", "15"))
     SNAPSHOT_WORKER_INTERVAL_MINUTES: int = int(os.getenv("SNAPSHOT_WORKER_INTERVAL_MINUTES", "5"))

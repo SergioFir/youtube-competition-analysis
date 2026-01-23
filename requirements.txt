@@ -15,3 +15,7 @@ schedule>=1.2.0
 
 # Logging (optional, stdlib is fine but this is nicer)
 loguru>=0.7.0
+
+# Web framework (for WebSub webhooks)
+fastapi>=0.115.0
+uvicorn>=0.32.0
