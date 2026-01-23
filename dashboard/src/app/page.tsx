@@ -1,0 +1,203 @@
+import { Suspense } from "react";
+import {
+  getChannels,
+  getRecentVideos,
+  getAllBaselines,
+  getSnapshotByWindow,
+  getBuckets,
+  getBucketChannels,
+  getChannelIdsForBucket,
+} from "@/lib/data";
+import { VideoCard } from "@/components/video-card";
+import { ChannelFilter } from "@/components/channel-filter";
+import { PerformanceFilter } from "@/components/performance-filter";
+import { BucketFilter } from "@/components/bucket-filter";
+import { BucketManager } from "@/components/bucket-manager";
+import { AddChannelDialog } from "@/components/add-channel-dialog";
+import { StatsOverview } from "@/components/stats-overview";
+import { Separator } from "@/components/ui/separator";
+import type { Video, Snapshot, ChannelBaseline } from "@/types/database";
+
+interface PageProps {
+  searchParams: Promise<{ channels?: string; performance?: string; bucket?: string }>;
+}
+
+export const revalidate = 60; // Revalidate every 60 seconds
+
+function getVideoPerformanceRatio(
+  video: Video & { snapshots: Snapshot[] },
+  baselines: ChannelBaseline[]
+): number | null {
+  const snapshot24h = getSnapshotByWindow(video.snapshots, "24h");
+  if (!snapshot24h) return null;
+
+  const baseline = baselines.find(
+    b => b.channel_id === video.channel_id &&
+         b.is_short === video.is_short &&
+         b.window_type === "24h"
+  );
+
+  if (!baseline?.median_views || baseline.median_views === 0) return null;
+
+  return snapshot24h.views / baseline.median_views;
+}
+
+export default async function Home({ searchParams }: PageProps) {
+  const params = await searchParams;
+  const selectedChannelIds = params.channels?.split(",").filter(Boolean) || [];
+  const performanceFilter = params.performance || "all";
+  const selectedBucketId = params.bucket || null;
+
+  const [channels, allVideos, baselines, buckets, bucketChannels] = await Promise.all([
+    getChannels(),
+    getRecentVideos(100),
+    getAllBaselines(),
+    getBuckets(),
+    getBucketChannels(),
+  ]);
+
+  // Determine which channel IDs to filter by
+  let filterChannelIds: string[] = [];
+
+  if (selectedBucketId) {
+    // Filter by bucket
+    filterChannelIds = getChannelIdsForBucket(selectedBucketId, bucketChannels);
+  } else if (selectedChannelIds.length > 0) {
+    // Filter by manually selected channels
+    filterChannelIds = selectedChannelIds;
+  }
+
+  // Filter videos by channels
+  let videos = filterChannelIds.length > 0
+    ? allVideos.filter(v => filterChannelIds.includes(v.channel_id))
+    : allVideos;
+
+  // Filter by performance
+  if (performanceFilter !== "all") {
+    videos = videos.filter(video => {
+      const ratio = getVideoPerformanceRatio(video, baselines);
+      if (ratio === null) return false; // No data yet
+
+      switch (performanceFilter) {
+        case "above":
+          return ratio >= 1;
+        case "hits":
+          return ratio >= 2;
+        case "below":
+          return ratio < 1;
+        default:
+          return true;
+      }
+    });
+  }
+
+  return (
+    <div className="min-h-screen bg-background">
+      {/* Header */}
+      <header className="border-b">
+        <div className="container mx-auto px-4 py-6 flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold">YouTube Competition Analysis</h1>
+            <p className="text-muted-foreground">
+              Track competitor videos and detect breakout content
+            </p>
+          </div>
+          <AddChannelDialog buckets={buckets} />
+        </div>
+      </header>
+
+      <main className="container mx-auto px-4 py-6 space-y-6">
+        {/* Stats Overview */}
+        <StatsOverview channels={channels} videos={allVideos} />
+
+        <Separator />
+
+        {/* Filters */}
+        <div className="space-y-4">
+          {/* Buckets */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-semibold">Filter by Bucket</h2>
+              <BucketManager
+                buckets={buckets}
+                bucketChannels={bucketChannels}
+                channels={channels}
+              />
+            </div>
+            <Suspense fallback={<div>Loading...</div>}>
+              <BucketFilter
+                buckets={buckets}
+                bucketChannels={bucketChannels}
+                selectedBucketId={selectedBucketId}
+              />
+            </Suspense>
+          </div>
+
+          {/* Channels (only show when no bucket selected) */}
+          {!selectedBucketId && (
+            <div>
+              <h2 className="text-lg font-semibold mb-3">Filter by Channel</h2>
+              <Suspense fallback={<div>Loading...</div>}>
+                <ChannelFilter
+                  channels={channels}
+                  selectedChannelIds={selectedChannelIds}
+                />
+              </Suspense>
+            </div>
+          )}
+
+          {/* Performance */}
+          <div>
+            <h2 className="text-lg font-semibold mb-3">Filter by Performance</h2>
+            <Suspense fallback={<div>Loading...</div>}>
+              <PerformanceFilter currentFilter={performanceFilter} />
+            </Suspense>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Video Grid */}
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold">
+              Recent Videos
+              <span className="font-normal text-muted-foreground ml-2">
+                ({videos.length} videos)
+              </span>
+            </h2>
+          </div>
+
+          {videos.length === 0 ? (
+            <div className="text-center py-12 text-muted-foreground">
+              <p>No videos match the current filters.</p>
+              <p className="text-sm mt-1">
+                Try adjusting your filters or wait for more data to be collected.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+              {videos.map((video) => (
+                <VideoCard
+                  key={video.video_id}
+                  video={video}
+                  baselines={baselines}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t mt-12">
+        <div className="container mx-auto px-4 py-6 text-center text-sm text-muted-foreground">
+          <p>
+            Baselines marked with <span className="font-mono bg-muted px-1 rounded">Est</span> are estimated from VidIQ data.
+            Real baselines will replace them as the system collects data.
+          </p>
+        </div>
+      </footer>
+    </div>
+  );
+}
