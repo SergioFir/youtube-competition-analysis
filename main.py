@@ -218,13 +218,16 @@ async def websub_notification(request: Request):
     Handle WebSub push notification.
     YouTube sends this when a new video is published.
     """
+    from datetime import datetime, timezone
     from src.discovery.websub import WebSubHandler
 
+    received_at = datetime.now(timezone.utc)
     body = await request.body()
-    logger.info(f"WebSub notification received ({len(body)} bytes)")
+
+    logger.info(f"🔔 WebSub notification received at {received_at.isoformat()} ({len(body)} bytes)")
 
     handler = WebSubHandler()
-    summary = handler.handle_notification(body)
+    summary = handler.handle_notification(body, received_at)
 
     logger.info(f"WebSub notification processed: {summary}")
 

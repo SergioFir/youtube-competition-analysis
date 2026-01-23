@@ -200,7 +200,7 @@ class WebSubHandler:
         logger.warning(f"Unknown verification mode: {mode}")
         return None
 
-    def handle_notification(self, body: bytes) -> dict:
+    def handle_notification(self, body: bytes, received_at: Optional[datetime] = None) -> dict:
         """
         Handle incoming WebSub notification (POST).
 
@@ -208,10 +208,14 @@ class WebSubHandler:
 
         Args:
             body: Raw XML body of the notification
+            received_at: Timestamp when webhook received the notification
 
         Returns:
             Summary dict with videos processed.
         """
+        if received_at is None:
+            received_at = datetime.now(timezone.utc)
+
         summary = {
             "videos_processed": 0,
             "videos_skipped": 0,
@@ -262,6 +266,26 @@ class WebSubHandler:
                         continue
 
                     channel_id = channel_id_elem.text
+
+                    # Extract published time from feed
+                    published_elem = entry.find("atom:published", ns)
+                    if published_elem is None:
+                        published_elem = entry.find("published")
+
+                    if published_elem is not None and published_elem.text:
+                        try:
+                            published_at = datetime.fromisoformat(published_elem.text.replace("Z", "+00:00"))
+                            delay_seconds = (received_at - published_at).total_seconds()
+                            delay_minutes = delay_seconds / 60
+
+                            logger.info(
+                                f"⏱️  WebSub Latency - Video {video_id}: "
+                                f"Published: {published_at.isoformat()}, "
+                                f"Received: {received_at.isoformat()}, "
+                                f"Delay: {delay_seconds:.1f}s ({delay_minutes:.2f} min)"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not parse published time: {e}")
 
                     # Check if video already exists
                     if video_exists(video_id):
