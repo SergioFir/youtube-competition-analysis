@@ -112,31 +112,34 @@ export default async function Home({ searchParams }: PageProps) {
 
         <Separator />
 
-        {/* Filters */}
-        <div className="space-y-4">
-          {/* Buckets */}
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-lg font-semibold">Filter by Bucket</h2>
-              <BucketManager
-                buckets={buckets}
-                bucketChannels={bucketChannels}
-                channels={channels}
-              />
+        {/* Buckets Section - Prominent */}
+        <div className="rounded-xl bg-gradient-to-r from-muted/50 to-muted/30 p-6 border">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-xl font-bold">Your Buckets</h2>
+              <p className="text-sm text-muted-foreground">Group channels by category</p>
             </div>
-            <Suspense fallback={<div>Loading...</div>}>
-              <BucketFilter
-                buckets={buckets}
-                bucketChannels={bucketChannels}
-                selectedBucketId={selectedBucketId}
-              />
-            </Suspense>
+            <BucketManager
+              buckets={buckets}
+              bucketChannels={bucketChannels}
+              channels={channels}
+            />
           </div>
+          <Suspense fallback={<div>Loading...</div>}>
+            <BucketFilter
+              buckets={buckets}
+              bucketChannels={bucketChannels}
+              selectedBucketId={selectedBucketId}
+            />
+          </Suspense>
+        </div>
 
+        {/* Other Filters */}
+        <div className="flex flex-wrap gap-6">
           {/* Channels (only show when no bucket selected) */}
           {!selectedBucketId && (
-            <div>
-              <h2 className="text-lg font-semibold mb-3">Filter by Channel</h2>
+            <div className="flex-1 min-w-[200px]">
+              <h2 className="text-sm font-semibold mb-2 text-muted-foreground uppercase tracking-wide">Channels</h2>
               <Suspense fallback={<div>Loading...</div>}>
                 <ChannelFilter
                   channels={channels}
@@ -147,8 +150,8 @@ export default async function Home({ searchParams }: PageProps) {
           )}
 
           {/* Performance */}
-          <div>
-            <h2 className="text-lg font-semibold mb-3">Filter by Performance</h2>
+          <div className="flex-1 min-w-[200px]">
+            <h2 className="text-sm font-semibold mb-2 text-muted-foreground uppercase tracking-wide">Performance</h2>
             <Suspense fallback={<div>Loading...</div>}>
               <PerformanceFilter currentFilter={performanceFilter} />
             </Suspense>
