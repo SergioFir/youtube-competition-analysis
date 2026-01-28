@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import Link from "next/link";
 import {
   getChannels,
   getRecentVideos,
@@ -7,6 +8,7 @@ import {
   getBuckets,
   getBucketChannels,
   getChannelIdsForBucket,
+  getLatestTrendingTopics,
 } from "@/lib/data";
 import { VideoCard } from "@/components/video-card";
 import { ChannelFilter } from "@/components/channel-filter";
@@ -16,6 +18,8 @@ import { BucketManager } from "@/components/bucket-manager";
 import { AddChannelDialog } from "@/components/add-channel-dialog";
 import { StatsOverview } from "@/components/stats-overview";
 import { Separator } from "@/components/ui/separator";
+import { Button } from "@/components/ui/button";
+import { Flame } from "lucide-react";
 import type { Video, Snapshot, ChannelBaseline } from "@/types/database";
 
 interface PageProps {
@@ -49,12 +53,13 @@ export default async function Home({ searchParams }: PageProps) {
   const performanceFilter = params.performance || "all";
   const selectedBucketId = params.bucket || null;
 
-  const [channels, allVideos, baselines, buckets, bucketChannels] = await Promise.all([
+  const [channels, allVideos, baselines, buckets, bucketChannels, trends] = await Promise.all([
     getChannels(),
     getRecentVideos(100),
     getAllBaselines(),
     getBuckets(),
     getBucketChannels(),
+    getLatestTrendingTopics(),
   ]);
 
   // Determine which channel IDs to filter by
@@ -103,7 +108,15 @@ export default async function Home({ searchParams }: PageProps) {
               Track competitor videos and detect breakout content
             </p>
           </div>
-          <AddChannelDialog buckets={buckets} />
+          <div className="flex items-center gap-3">
+            <Link href="/trends">
+              <Button variant={trends.length > 0 ? "default" : "outline"} className={trends.length > 0 ? "bg-orange-500 hover:bg-orange-600" : ""}>
+                <Flame className="h-4 w-4 mr-2" />
+                Trends {trends.length > 0 && `(${trends.length})`}
+              </Button>
+            </Link>
+            <AddChannelDialog buckets={buckets} />
+          </div>
         </div>
       </header>
 

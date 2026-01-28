@@ -22,3 +22,7 @@ uvicorn>=0.32.0
 
 # Excel file reading (for seed data import)
 openpyxl>=3.1.0
+
+# Trend detection
+youtube-transcript-api>=0.6.0  # Fetch video transcripts
+openai>=1.0.0                  # OpenRouter uses OpenAI-compatible API

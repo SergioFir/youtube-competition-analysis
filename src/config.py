@@ -56,6 +56,16 @@ class Config:
     # Retry settings
     MAX_SNAPSHOT_ATTEMPTS: int = 3
 
+    # Trend Detection - OpenRouter
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat")  # Cheap and good
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+
+    # Trend Detection - Rules
+    TREND_MIN_CHANNELS: int = 3           # Minimum channels for a topic to be trending
+    TREND_MIN_PERFORMANCE: float = 1.5    # Minimum performance ratio (1.5x baseline)
+    TREND_WINDOW_DAYS: int = 14           # Look back 14 days for trends
+
     @classmethod
     def validate(cls) -> list[str]:
         """

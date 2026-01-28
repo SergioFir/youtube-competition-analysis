@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import type { Channel, Video, Snapshot, ChannelBaseline, Bucket, BucketChannel } from "@/types/database";
+import type { Channel, Video, Snapshot, ChannelBaseline, Bucket, BucketChannel, TrendingTopic, TrendingTopicWithDetails } from "@/types/database";
 
 export async function getChannels(): Promise<Channel[]> {
   const { data, error } = await supabase
@@ -222,4 +222,122 @@ export function getChannelIdsForBucket(bucketId: string, bucketChannels: BucketC
   return bucketChannels
     .filter(bc => bc.bucket_id === bucketId)
     .map(bc => bc.channel_id);
+}
+
+// Trending Topics functions
+export async function getTrendingTopics(): Promise<TrendingTopic[]> {
+  const { data, error } = await supabase
+    .from("trending_topics")
+    .select(`
+      *,
+      topic_clusters(*)
+    `)
+    .order("detected_at", { ascending: false })
+    .limit(50);
+
+  if (error) {
+    console.error("Error fetching trending topics:", error);
+    return [];
+  }
+
+  return data || [];
+}
+
+export async function getLatestTrendingTopics(): Promise<TrendingTopic[]> {
+  // Get only the most recent detection run
+  const { data: latestRun, error: latestError } = await supabase
+    .from("trending_topics")
+    .select("detected_at")
+    .order("detected_at", { ascending: false })
+    .limit(1)
+    .single();
+
+  if (latestError || !latestRun) {
+    // No trends yet or error
+    if (latestError?.code !== "PGRST116") {
+      console.error("Error fetching latest trend run:", latestError);
+    }
+    return [];
+  }
+
+  const detectedAt = (latestRun as { detected_at: string }).detected_at;
+
+  const { data, error } = await supabase
+    .from("trending_topics")
+    .select(`
+      *,
+      topic_clusters(*)
+    `)
+    .eq("detected_at", detectedAt)
+    .order("channel_count", { ascending: false });
+
+  if (error) {
+    console.error("Error fetching trending topics:", error);
+    return [];
+  }
+
+  return data || [];
+}
+
+export async function getTrendingTopicWithVideos(trendId: number): Promise<TrendingTopicWithDetails | null> {
+  // Get the trend
+  const { data: trendData, error: trendError } = await supabase
+    .from("trending_topics")
+    .select(`
+      *,
+      topic_clusters(*)
+    `)
+    .eq("id", trendId)
+    .single();
+
+  if (trendError || !trendData) {
+    console.error("Error fetching trend:", trendError);
+    return null;
+  }
+
+  const trend = trendData as TrendingTopic;
+
+  // Get the videos
+  if (!trend.video_ids || trend.video_ids.length === 0) {
+    return { ...trend, videos: [] };
+  }
+
+  const { data: videos, error: videosError } = await supabase
+    .from("videos")
+    .select(`
+      *,
+      channel:channels(*),
+      snapshots(*)
+    `)
+    .in("video_id", trend.video_ids);
+
+  if (videosError) {
+    console.error("Error fetching trend videos:", videosError);
+    return { ...trend, videos: [] };
+  }
+
+  return {
+    ...trend,
+    videos: videos as (Video & { channel: Channel; snapshots: Snapshot[] })[]
+  };
+}
+
+export async function getVideosByIds(videoIds: string[]): Promise<(Video & { channel: Channel; snapshots: Snapshot[] })[]> {
+  if (!videoIds || videoIds.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from("videos")
+    .select(`
+      *,
+      channel:channels(*),
+      snapshots(*)
+    `)
+    .in("video_id", videoIds);
+
+  if (error) {
+    console.error("Error fetching videos by ids:", error);
+    return [];
+  }
+
+  return (data || []) as (Video & { channel: Channel; snapshots: Snapshot[] })[];
 }

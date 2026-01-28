@@ -101,3 +101,35 @@ export interface VideoWithSnapshots extends Video {
 export interface ChannelWithBaselines extends Channel {
   baselines: ChannelBaseline[];
 }
+
+// Trend Detection Types
+export interface TopicCluster {
+  id: string;
+  normalized_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TrendingTopic {
+  id: number;
+  cluster_id: string;
+  channel_count: number;
+  video_count: number;
+  avg_performance: number | null;
+  video_ids: string[];
+  detected_at: string;
+  period_start: string;
+  period_end: string;
+  topic_clusters?: TopicCluster;
+}
+
+export interface VideoTopic {
+  id: number;
+  video_id: string;
+  topic: string;
+  extracted_at: string;
+}
+
+export interface TrendingTopicWithDetails extends TrendingTopic {
+  videos: (Video & { channel: Channel; snapshots: Snapshot[] })[];
+}

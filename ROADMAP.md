@@ -28,12 +28,12 @@ Build an internal competitive-intelligence system for YouTube content that answe
 | Layer | Name | Status | Description |
 |-------|------|--------|-------------|
 | 1 | Tracking & Baselines | **COMPLETE** | Observe videos, capture snapshots, build baselines |
-| 1.5 | Deployment & Dashboard | **CURRENT** | Deploy tracker, seed data, build internal UI |
-| 2 | HIT Detection | NEXT | Detect breakout videos using relative velocity |
-| 3 | Trend Detection | NOT STARTED | Group HITs by topic, identify cross-channel trends |
+| 1.5 | Deployment & Dashboard | **COMPLETE** | Deploy tracker, seed data, build internal UI |
+| 2 | Trend Detection | **CURRENT** | Detect hot topics across multiple channels |
+| 3 | HIT Detection | NOT STARTED | Detect individual breakout videos |
 | 4 | Channel Discovery | NOT STARTED | Auto-discover and prune competitor channels |
 
-**Current: Deploying tracker + building dashboard. Then HIT Detection.**
+**Current: Trend Detection is next.**
 
 ---
 
@@ -159,6 +159,33 @@ PRIMARY KEY (channel_id, is_short, window_type)
 **Note:** `source = 'manual'` indicates seed data from VidIQ. UI shows these as "Estimated".
 Once system calculates real baselines, they update to `source = 'calculated'`.
 
+### Table: `buckets`
+```sql
+id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+name                TEXT NOT NULL
+description         TEXT
+color               TEXT              -- Hex color for UI
+created_at          TIMESTAMP DEFAULT now()
+```
+
+### Table: `bucket_channels` (many-to-many)
+```sql
+bucket_id           UUID REFERENCES buckets(id) ON DELETE CASCADE
+channel_id          TEXT REFERENCES channels(channel_id) ON DELETE CASCADE
+created_at          TIMESTAMP DEFAULT now()
+PRIMARY KEY (bucket_id, channel_id)
+```
+
+### Table: `websub_subscriptions`
+```sql
+channel_id          TEXT PRIMARY KEY REFERENCES channels(channel_id)
+feed_url            TEXT NOT NULL
+callback_url        TEXT NOT NULL
+subscribed_at       TIMESTAMP
+expires_at          TIMESTAMP
+is_active           BOOLEAN DEFAULT true
+```
+
 ---
 
 ## Python Project Structure
@@ -246,12 +273,13 @@ youtube-tracker/
 - [x] **6.3** Create main.py entry point
 - [x] **6.4** Test: System running and collecting data
 
-### Phase 7: Production Readiness
+### Phase 7: Production Readiness ✅
 - [x] **7.1** Implement WebSub subscription (`discovery/websub.py`)
 - [x] **7.2** Implement subscription renewal job
 - [x] **7.3** Add FastAPI web server for webhook endpoints
-- [ ] **7.4** Switch from polling to WebSub (set DISCOVERY_MODE=websub)
-- [ ] **7.5** Monitor for 7 days
+- [x] **7.4** Switch from polling to WebSub (set DISCOVERY_MODE=websub)
+- [x] **7.5** Add WebSub latency tracking
+- [ ] **7.6** Monitor WebSub reliability over time (ongoing)
 
 ---
 
@@ -265,39 +293,131 @@ youtube-tracker/
 - [x] **8.5** Configure environment variables in Railway
 - [x] **8.6** Verify tracker runs 24/7 and collects data
 
-### Phase 9: Seed Data Import
-- [ ] **9.1** User provides spreadsheet with 20-30 channels + estimated 24h medians
-- [ ] **9.2** Create import script for channels and seed baselines
-- [ ] **9.3** Import all channels with `source = 'manual'` baselines
-- [ ] **9.4** Verify channels are being tracked
+### Phase 9: Seed Data Import ✅
+- [x] **9.1** User provides spreadsheet with 20-30 channels + estimated 24h medians
+- [x] **9.2** Create import script for channels and seed baselines
+- [x] **9.3** Import all channels with `source = 'manual'` baselines (11 channels imported from VidIQ)
+- [x] **9.4** Verify channels are being tracked
 
-### Phase 10: Next.js Dashboard
-- [ ] **10.1** Create Next.js project
-- [ ] **10.2** Connect to Supabase
-- [ ] **10.3** Build channel list page
-- [ ] **10.4** Build video grid with thumbnails
-- [ ] **10.5** Show video performance vs baseline
-- [ ] **10.6** Mark estimated baselines as "Estimated" in UI
-- [ ] **10.7** Deploy to Vercel
+### Phase 10: Next.js Dashboard ✅
+- [x] **10.1** Create Next.js project (dashboard/ folder with shadcn/ui)
+- [x] **10.2** Connect to Supabase
+- [x] **10.3** Build channel list page
+- [x] **10.4** Build video grid with thumbnails
+- [x] **10.5** Show video performance vs baseline
+- [x] **10.6** Mark estimated baselines as "Estimated" in UI
+- [x] **10.7** Deploy to Vercel
+- [x] **10.8** Add multi-channel filter
+- [x] **10.9** Add performance filter (All/Above Baseline/Potential HITs/Below Baseline)
+- [x] **10.10** Add bucket system for grouping channels (database tables + UI)
+- [x] **10.11** Add channel dialog with VPH estimation and bucket assignment
+- [x] **10.12** Add WebSub latency tracking (logs time between publish and webhook receipt)
 
-### What Dashboard Shows (MVP)
-- List of tracked channels with subscriber count
+### What Dashboard Shows (MVP) ✅
+- Stats overview (total videos, channels, snapshots, avg performance)
+- Bucket filter (card-based, color-coded channel groups)
+- Multi-channel filter with checkboxes
+- Performance filter (All/Above Baseline/Potential HITs/Below)
 - Video grid with thumbnails, titles, publish date
 - Performance metrics: views at 1h, 6h, 24h, 48h
 - Baseline comparison: "2.5x above median" or "0.4x below"
-- Visual indicator: estimated vs real baselines
-- Filter by channel
+- Add channel dialog with YouTube URL resolution
 
 ---
 
-## Part 2: HIT Detection (After Dashboard)
+## Part 2: Trend Detection (CURRENT)
 
-### Phase 11: HIT Detection Logic
-- [ ] **11.1** Define HIT thresholds (relative velocity > 2.0, etc.)
-- [ ] **11.2** Implement HIT calculation in Python
-- [ ] **11.3** Store HIT flags in database
-- [ ] **11.4** Add HIT indicators to dashboard
-- [ ] **11.5** Test with real data
+### Goal
+Detect hot topics that are working across multiple channels, so we can create similar content while the trend is still hot.
+
+### Trend Detection Rules
+```
+A topic is TRENDING if:
+  - At least 3 different channels posted about it
+  - Only counts videos performing >= 1.5x baseline
+  - Within the last 14 days
+```
+
+### How It Works
+
+1. **Topic Extraction (per video at 24h snapshot)**
+   - Fetch transcript via `youtube-transcript-api`
+   - Fallback to title + description if no transcript
+   - Send to AI (DeepSeek via OpenRouter): "Extract 1-3 specific topics"
+   - Store raw topics in `video_topics` table
+
+2. **Topic Clustering (daily job)**
+   - Gather all topics from videos in last 14 days with 1.5x+ performance
+   - Send to AI: "Group similar topics into clusters"
+   - Store normalized clusters in `topic_clusters` table
+
+3. **Trend Calculation (daily job)**
+   - For each cluster, count unique channels
+   - Filter clusters with 3+ channels
+   - Calculate avg performance, video count
+   - Store in `trending_topics` table
+
+### Database Tables
+
+#### Table: `video_topics`
+```sql
+id                  SERIAL PRIMARY KEY
+video_id            TEXT REFERENCES videos(video_id)
+topic               TEXT NOT NULL           -- Raw topic from AI
+extracted_at        TIMESTAMP DEFAULT now()
+```
+
+#### Table: `topic_clusters`
+```sql
+id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+normalized_name     TEXT NOT NULL           -- "ChatGPT Prompting"
+created_at          TIMESTAMP DEFAULT now()
+updated_at          TIMESTAMP DEFAULT now()
+```
+
+#### Table: `cluster_topics` (maps raw topics to clusters)
+```sql
+cluster_id          UUID REFERENCES topic_clusters(id) ON DELETE CASCADE
+topic               TEXT NOT NULL           -- Raw topic string
+created_at          TIMESTAMP DEFAULT now()
+PRIMARY KEY (cluster_id, topic)
+```
+
+#### Table: `trending_topics`
+```sql
+id                  SERIAL PRIMARY KEY
+cluster_id          UUID REFERENCES topic_clusters(id)
+channel_count       INTEGER NOT NULL
+video_count         INTEGER NOT NULL
+avg_performance     DECIMAL(5,2)            -- e.g., 2.3 = 2.3x baseline
+video_ids           TEXT[]                  -- Array of video IDs
+detected_at         TIMESTAMP DEFAULT now()
+period_start        TIMESTAMP               -- 14 days ago
+period_end          TIMESTAMP               -- now
+```
+
+### Phase 11: Trend Detection Implementation
+- [ ] **11.1** Create database tables for topics and trends
+- [ ] **11.2** Add `youtube-transcript-api` to requirements
+- [ ] **11.3** Implement transcript fetcher with fallback
+- [ ] **11.4** Set up OpenRouter client for AI calls
+- [ ] **11.5** Implement topic extraction (per video)
+- [ ] **11.6** Implement topic clustering (daily job)
+- [ ] **11.7** Implement trend calculation
+- [ ] **11.8** Create backfill script for existing videos
+- [ ] **11.9** Add trending topics page to dashboard
+- [ ] **11.10** Test with real data
+
+---
+
+## Part 3: HIT Detection (After Trend Detection)
+
+### Phase 12: HIT Detection Logic
+- [ ] **12.1** Define HIT thresholds (relative velocity > 2.0, etc.)
+- [ ] **12.2** Implement HIT calculation in Python
+- [ ] **12.3** Store HIT flags in database
+- [ ] **12.4** Add HIT indicators to dashboard
+- [ ] **12.5** Test with real data
 
 ### HIT Detection Rules (Preview)
 ```
@@ -414,6 +534,7 @@ PORT=8080  # Railway sets this automatically
 | 2024-01-19 | Baseline calculation updated: now uses ANY video with snapshot at window, not just completed videos. This allows baselines to be available immediately (after min sample reached) instead of waiting 14 days. |
 | 2024-01-20 | Added Part 1.5: Deployment & Dashboard. Plan to deploy tracker to Railway, seed with VidIQ data, build Next.js dashboard. Added `source` column to baselines schema for tracking manual vs calculated data. |
 | 2024-01-23 | Implemented WebSub for real-time video notifications. Added FastAPI web server, webhook endpoints, subscription management. Domain: creatrr.app |
+| 2024-01-26 | Phase 9 (Seed Data) complete: 11 channels imported from VidIQ. Phase 10 (Dashboard) complete: Next.js + shadcn/ui deployed to Vercel. Added bucket system for channel grouping, multi-channel filter, performance filter, add channel dialog. Added WebSub latency tracking. Part 1.5 complete - ready for HIT Detection. |
 
 ---
 
