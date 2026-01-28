@@ -347,56 +347,20 @@ export async function getVideosByIds(videoIds: string[]): Promise<(Video & { cha
   return (data || []) as (Video & { channel: Channel; snapshots: Snapshot[] })[];
 }
 
-export async function getTrendsForChannels(channelIds: string[]): Promise<TrendingTopic[]> {
-  // Get all recent trends
-  const trends = await getLatestTrendingTopics();
+export async function getTrendsForBucket(bucketId: string): Promise<TrendingTopic[]> {
+  const { data, error } = await supabase
+    .from("trending_topics")
+    .select(`
+      *,
+      topic_clusters(*)
+    `)
+    .eq("bucket_id", bucketId)
+    .order("channel_count", { ascending: false });
 
-  if (!trends.length || !channelIds.length) return trends;
+  if (error) {
+    console.error("Error fetching trends for bucket:", error);
+    return [];
+  }
 
-  // Get videos for all trends to filter by channel
-  const allVideoIds = trends.flatMap(t => t.video_ids || []);
-  const uniqueVideoIds = [...new Set(allVideoIds)];
-
-  if (!uniqueVideoIds.length) return [];
-
-  // Get videos with their channel IDs
-  const { data: videosData, error } = await supabase
-    .from("videos")
-    .select("video_id, channel_id")
-    .in("video_id", uniqueVideoIds);
-
-  if (error || !videosData) return [];
-
-  const videos = videosData as { video_id: string; channel_id: string }[];
-
-  // Create lookup
-  const videoChannelMap = new Map(videos.map(v => [v.video_id, v.channel_id]));
-
-  // Filter trends to only those with videos from the selected channels
-  // and recalculate channel count for the filtered set
-  const filteredTrends = trends.map(trend => {
-    const trendVideoIds = trend.video_ids || [];
-    const matchingVideoIds = trendVideoIds.filter(vid => {
-      const channelId = videoChannelMap.get(vid);
-      return channelId && channelIds.includes(channelId);
-    });
-
-    if (matchingVideoIds.length === 0) return null;
-
-    // Get unique channels in the filtered set
-    const uniqueChannelsInTrend = new Set(
-      matchingVideoIds
-        .map(vid => videoChannelMap.get(vid))
-        .filter(Boolean)
-    );
-
-    return {
-      ...trend,
-      video_ids: matchingVideoIds,
-      video_count: matchingVideoIds.length,
-      channel_count: uniqueChannelsInTrend.size,
-    };
-  }).filter((t): t is TrendingTopic => t !== null && t.channel_count >= 2);
-
-  return filteredTrends;
+  return (data || []) as TrendingTopic[];
 }

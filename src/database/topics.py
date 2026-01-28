@@ -62,14 +62,16 @@ def video_has_topics(video_id: str) -> bool:
         return False
 
 
-def get_all_topics_for_trending(
+def get_topics_for_bucket(
+    channel_ids: list[str],
     days: int = None,
     min_performance: float = None,
 ) -> list[dict]:
     """
-    Get all topics from high-performing videos in the time window.
+    Get topics from high-performing videos for specific channels (bucket).
 
     Args:
+        channel_ids: List of channel IDs to include
         days: Number of days to look back (default: TREND_WINDOW_DAYS)
         min_performance: Minimum performance ratio (default: TREND_MIN_PERFORMANCE)
 
@@ -81,52 +83,41 @@ def get_all_topics_for_trending(
     if min_performance is None:
         min_performance = Config.TREND_MIN_PERFORMANCE
 
+    if not channel_ids:
+        return []
+
     client = get_client()
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
-    try:
-        # Complex query: join video_topics with videos, snapshots, and baselines
-        # to filter by performance
-        query = f"""
-        SELECT
-            vt.video_id,
-            vt.topic,
-            v.channel_id,
-            v.title,
-            v.published_at,
-            s.views as views_24h,
-            b.median_views as baseline_24h,
-            CASE
-                WHEN b.median_views > 0 THEN ROUND((s.views::decimal / b.median_views)::numeric, 2)
-                ELSE NULL
-            END as performance_ratio
-        FROM video_topics vt
-        JOIN videos v ON vt.video_id = v.video_id
-        JOIN snapshots s ON v.video_id = s.video_id AND s.window_type = '24h'
-        LEFT JOIN channel_baselines b ON v.channel_id = b.channel_id
-            AND v.is_short = b.is_short
-            AND b.window_type = '24h'
-        WHERE v.published_at >= '{cutoff.isoformat()}'
-            AND (b.median_views IS NULL OR s.views >= b.median_views * {min_performance})
-        ORDER BY v.published_at DESC
-        """
-
-        result = client.rpc("exec_sql", {"query": query}).execute()
-
-        # If RPC doesn't exist, fall back to manual join
-        if not result.data:
-            # Fallback: get topics and filter in Python
-            return _get_topics_fallback(client, cutoff, min_performance)
-
-        return result.data
-
-    except Exception as e:
-        logger.warning(f"Error in trending query, using fallback: {e}")
-        return _get_topics_fallback(client, cutoff, min_performance)
+    return _get_topics_fallback(client, cutoff, min_performance, channel_ids)
 
 
-def _get_topics_fallback(client, cutoff: datetime, min_performance: float) -> list[dict]:
-    """Fallback method to get topics when RPC is unavailable."""
+def get_all_topics_for_trending(
+    days: int = None,
+    min_performance: float = None,
+) -> list[dict]:
+    """
+    Get all topics from high-performing videos in the time window.
+    (Legacy function - use get_topics_for_bucket for per-bucket detection)
+    """
+    if days is None:
+        days = Config.TREND_WINDOW_DAYS
+    if min_performance is None:
+        min_performance = Config.TREND_MIN_PERFORMANCE
+
+    client = get_client()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    return _get_topics_fallback(client, cutoff, min_performance)
+
+
+def _get_topics_fallback(
+    client,
+    cutoff: datetime,
+    min_performance: float,
+    channel_ids: list[str] = None
+) -> list[dict]:
+    """Fallback method to get topics, optionally filtered by channels."""
     try:
         # Get all video topics
         topics_result = client.table("video_topics").select("video_id, topic").execute()
@@ -138,9 +129,15 @@ def _get_topics_fallback(client, cutoff: datetime, min_performance: float) -> li
             topics_by_video[vid].append(row["topic"])
 
         # Get videos with their performance
-        videos_result = client.table("videos").select(
+        query = client.table("videos").select(
             "video_id, channel_id, title, published_at, is_short"
-        ).gte("published_at", cutoff.isoformat()).execute()
+        ).gte("published_at", cutoff.isoformat())
+
+        # Filter by channels if specified
+        if channel_ids:
+            query = query.in_("channel_id", channel_ids)
+
+        videos_result = query.execute()
 
         # Get 24h snapshots
         video_ids = [v["video_id"] for v in videos_result.data]
@@ -196,13 +193,14 @@ def _get_topics_fallback(client, cutoff: datetime, min_performance: float) -> li
         return []
 
 
-def save_cluster(normalized_name: str, topics: list[str]) -> Optional[str]:
+def save_cluster(normalized_name: str, topics: list[str], bucket_id: str = None) -> Optional[str]:
     """
     Save a topic cluster to the database.
 
     Args:
         normalized_name: Normalized cluster name
         topics: List of raw topics in this cluster
+        bucket_id: Optional bucket ID this cluster belongs to
 
     Returns:
         Cluster ID if successful.
@@ -210,10 +208,16 @@ def save_cluster(normalized_name: str, topics: list[str]) -> Optional[str]:
     client = get_client()
 
     try:
-        # Check if cluster already exists
-        existing = client.table("topic_clusters").select("id").eq(
+        # Check if cluster already exists for this bucket
+        query = client.table("topic_clusters").select("id").eq(
             "normalized_name", normalized_name
-        ).execute()
+        )
+        if bucket_id:
+            query = query.eq("bucket_id", bucket_id)
+        else:
+            query = query.is_("bucket_id", "null")
+
+        existing = query.execute()
 
         if existing.data:
             cluster_id = existing.data[0]["id"]
@@ -223,9 +227,11 @@ def save_cluster(normalized_name: str, topics: list[str]) -> Optional[str]:
             }).eq("id", cluster_id).execute()
         else:
             # Create new cluster
-            result = client.table("topic_clusters").insert({
-                "normalized_name": normalized_name,
-            }).execute()
+            insert_data = {"normalized_name": normalized_name}
+            if bucket_id:
+                insert_data["bucket_id"] = bucket_id
+
+            result = client.table("topic_clusters").insert(insert_data).execute()
             cluster_id = result.data[0]["id"]
 
         # Add topics to cluster (upsert to avoid duplicates)
@@ -253,12 +259,13 @@ def save_trending_topic(
     video_ids: list[str],
     period_start: datetime,
     period_end: datetime,
+    bucket_id: str = None,
 ) -> bool:
     """Save a trending topic snapshot."""
     client = get_client()
 
     try:
-        client.table("trending_topics").insert({
+        insert_data = {
             "cluster_id": cluster_id,
             "channel_count": channel_count,
             "video_count": video_count,
@@ -266,11 +273,37 @@ def save_trending_topic(
             "video_ids": video_ids,
             "period_start": period_start.isoformat(),
             "period_end": period_end.isoformat(),
-        }).execute()
+        }
+        if bucket_id:
+            insert_data["bucket_id"] = bucket_id
+
+        client.table("trending_topics").insert(insert_data).execute()
         return True
     except Exception as e:
         logger.error(f"Error saving trending topic: {e}")
         return False
+
+
+def clear_old_trends() -> int:
+    """
+    Clear old trending topics before running new detection.
+    Keeps only the latest detection run per bucket.
+
+    Returns:
+        Number of deleted records.
+    """
+    client = get_client()
+
+    try:
+        # Delete all existing trends (we regenerate fresh each run)
+        result = client.table("trending_topics").delete().neq("id", 0).execute()
+        count = len(result.data) if result.data else 0
+        if count > 0:
+            logger.info(f"Cleared {count} old trending topics")
+        return count
+    except Exception as e:
+        logger.error(f"Error clearing old trends: {e}")
+        return 0
 
 
 def get_trending_topics(limit: int = 20) -> list[dict]:

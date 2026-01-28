@@ -11,37 +11,27 @@ from src.config import Config
 from src.trends.extractor import get_client
 
 
-CLUSTERING_PROMPT = """You are a content analyst. Group these YouTube video topics into clusters of similar topics.
+CLUSTERING_PROMPT = """Group these YouTube video topics into clusters. {context}
 
-Rules:
-- Group topics that are essentially about the same thing
-- Create a normalized name for each cluster (2-5 words, lowercase)
-- Only create clusters for topics that have at least 2 similar items
-- Single unique topics should be their own cluster
-- Be specific with cluster names
-
-Input topics:
+Topics:
 {topics}
 
-Output format (JSON):
-{{
-  "clusters": [
-    {{
-      "name": "normalized cluster name",
-      "topics": ["original topic 1", "original topic 2"]
-    }}
-  ]
-}}
+Rules:
+1. Group similar topics together
+2. Cluster name: 2-5 lowercase words
+3. Include ALL topics (even unique ones as single-item clusters)
 
-Return ONLY valid JSON, no markdown or explanation."""
+Return ONLY this JSON format, nothing else:
+{{"clusters":[{{"name":"example name","topics":["topic1","topic2"]}}]}}"""
 
 
-def cluster_topics(topics: list[str]) -> dict:
+def cluster_topics(topics: list[str], context: str = "") -> dict:
     """
     Group similar topics into clusters using AI.
 
     Args:
         topics: List of raw topic strings
+        context: Optional context about the topics (e.g., bucket name)
 
     Returns:
         Dict with 'clusters' list, each containing 'name' and 'topics'.
@@ -64,31 +54,55 @@ def cluster_topics(topics: list[str]) -> dict:
         # Format topics as a list
         topics_text = "\n".join(f"- {t}" for t in unique_topics)
 
-        response = client.chat.completions.create(
-            model=Config.OPENROUTER_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": CLUSTERING_PROMPT.format(topics=topics_text)
-                }
-            ],
-            max_tokens=1000,
-            temperature=0.2,  # Lower = more consistent
-        )
+        # Build prompt with optional context
+        context_text = f"Context: {context}\n" if context else ""
 
-        result = response.choices[0].message.content.strip()
-
-        # Try to parse JSON
         import json
+        import re
 
-        # Clean up potential markdown code blocks
-        if result.startswith("```"):
-            result = result.split("```")[1]
-            if result.startswith("json"):
-                result = result[4:]
+        def try_parse_response(attempt: int = 1) -> dict:
+            response = client.chat.completions.create(
+                model=Config.OPENROUTER_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": CLUSTERING_PROMPT.format(context=context_text, topics=topics_text)
+                    }
+                ],
+                max_tokens=2000,
+                temperature=0.1,  # Very low for consistency
+            )
+
+            result = response.choices[0].message.content.strip()
+
+            # Clean up response
+            # Remove markdown code blocks
+            if "```" in result:
+                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', result)
+                if match:
+                    result = match.group(1)
+                else:
+                    result = result.replace("```json", "").replace("```", "")
+
+            # Find JSON object
+            start = result.find("{")
+            end = result.rfind("}") + 1
+            if start >= 0 and end > start:
+                result = result[start:end]
+
             result = result.strip()
 
-        data = json.loads(result)
+            return json.loads(result)
+
+        # Try up to 2 times
+        try:
+            data = try_parse_response(1)
+        except json.JSONDecodeError:
+            logger.warning("First clustering attempt failed, retrying...")
+            try:
+                data = try_parse_response(2)
+            except json.JSONDecodeError as e:
+                raise e
 
         # Validate structure
         if "clusters" not in data:

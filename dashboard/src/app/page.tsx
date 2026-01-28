@@ -7,7 +7,7 @@ import {
   getBuckets,
   getBucketChannels,
   getChannelIdsForBucket,
-  getTrendsForChannels,
+  getTrendsForBucket,
   getVideosByIds,
 } from "@/lib/data";
 import { VideoCard } from "@/components/video-card";
@@ -97,9 +97,9 @@ export default async function Home({ searchParams }: PageProps) {
     });
   }
 
-  // Get trends for selected channels (only when in trends view or to check if trends exist)
-  const trends = filterChannelIds.length > 0
-    ? await getTrendsForChannels(filterChannelIds)
+  // Get trends for selected bucket
+  const trends = selectedBucketId
+    ? await getTrendsForBucket(selectedBucketId)
     : [];
 
   // Get videos for trends if in trends view

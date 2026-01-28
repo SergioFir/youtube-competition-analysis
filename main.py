@@ -96,6 +96,26 @@ async def run_scheduler_background():
             except Exception as e:
                 logger.error(f"WebSub renewal failed: {e}")
 
+    def run_trend_detection():
+        """Run trend detection job."""
+        logger.info("Running trend detection...")
+        try:
+            from scripts.backfill_topics import get_videos_to_process, backfill_topics
+            from src.trends.detector import detect_trends
+
+            # First extract topics from any new high-performing videos
+            videos = get_videos_to_process(all_videos=False)
+            if videos:
+                logger.info(f"Extracting topics from {len(videos)} videos...")
+                stats = backfill_topics(videos)
+                logger.info(f"Topic extraction: {stats}")
+
+            # Then run trend detection
+            trends = detect_trends()
+            logger.info(f"Trend detection complete: {len(trends)} trends found")
+        except Exception as e:
+            logger.error(f"Trend detection failed: {e}")
+
     # Set up schedules based on discovery mode
     if Config.DISCOVERY_MODE == "polling":
         schedule.every(Config.POLLING_INTERVAL_MINUTES).minutes.do(run_discovery)
@@ -111,10 +131,12 @@ async def run_scheduler_background():
     schedule.every(Config.SNAPSHOT_WORKER_INTERVAL_MINUTES).minutes.do(run_snapshot_worker)
     schedule.every(Config.BASELINE_UPDATE_HOURS).hours.do(run_baseline_calculator)
     schedule.every(1).hours.do(run_completion_check)
+    schedule.every().day.at("02:00").do(run_trend_detection)  # Run daily at 2 AM UTC
 
     logger.info(f"Snapshots: every {Config.SNAPSHOT_WORKER_INTERVAL_MINUTES} minutes")
     logger.info(f"Baselines: every {Config.BASELINE_UPDATE_HOURS} hours")
     logger.info(f"Completion check: every 1 hour")
+    logger.info(f"Trend detection: daily at 02:00 UTC")
 
     # Run discovery and snapshots immediately on start
     run_discovery()
@@ -233,6 +255,71 @@ async def websub_notification(request: Request):
 
     # Always return 200 to acknowledge receipt
     return {"status": "received", "summary": summary}
+
+
+@app.post("/run-trends")
+async def run_trends_endpoint():
+    """
+    Manually trigger trend detection.
+    Use this to test trend detection or run it on-demand.
+    """
+    from scripts.backfill_topics import get_videos_to_process, backfill_topics
+    from src.trends.detector import detect_trends
+
+    logger.info("Manual trend detection triggered via /run-trends")
+
+    result = {
+        "status": "running",
+        "extraction": {},
+        "detection": {},
+    }
+
+    try:
+        # Extract topics from new high-performing videos
+        videos = get_videos_to_process(all_videos=False)
+        if videos:
+            logger.info(f"Extracting topics from {len(videos)} videos...")
+            stats = backfill_topics(videos)
+            result["extraction"] = stats
+        else:
+            result["extraction"] = {"message": "No new videos to process"}
+
+        # Run trend detection
+        trends = detect_trends()
+        result["detection"] = {
+            "trends_found": len(trends),
+            "trends": [
+                {
+                    "name": t["name"],
+                    "channels": t["channel_count"],
+                    "videos": t["video_count"],
+                    "avg_performance": t["avg_performance"],
+                }
+                for t in trends
+            ]
+        }
+        result["status"] = "success"
+
+    except Exception as e:
+        logger.error(f"Trend detection failed: {e}")
+        result["status"] = "error"
+        result["error"] = str(e)
+
+    return result
+
+
+@app.get("/trends")
+async def get_trends():
+    """
+    Get current trending topics.
+    """
+    from src.database.topics import get_trending_topics
+
+    trends = get_trending_topics(limit=20)
+    return {
+        "count": len(trends),
+        "trends": trends,
+    }
 
 
 def test_connection():
