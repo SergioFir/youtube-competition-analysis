@@ -48,6 +48,9 @@ def cluster_topics(topics: list[str], context: str = "") -> dict:
             return {"clusters": [{"name": unique_topics[0], "topics": unique_topics}]}
         return {"clusters": []}
 
+    import json
+    import re
+
     try:
         client = get_client()
 
@@ -56,9 +59,6 @@ def cluster_topics(topics: list[str], context: str = "") -> dict:
 
         # Build prompt with optional context
         context_text = f"Context: {context}\n" if context else ""
-
-        import json
-        import re
 
         def try_parse_response(attempt: int = 1) -> dict:
             response = client.chat.completions.create(
