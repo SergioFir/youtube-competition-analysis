@@ -1,5 +1,4 @@
 import { Suspense } from "react";
-import Link from "next/link";
 import {
   getChannels,
   getRecentVideos,
@@ -8,7 +7,8 @@ import {
   getBuckets,
   getBucketChannels,
   getChannelIdsForBucket,
-  getLatestTrendingTopics,
+  getTrendsForChannels,
+  getVideosByIds,
 } from "@/lib/data";
 import { VideoCard } from "@/components/video-card";
 import { ChannelFilter } from "@/components/channel-filter";
@@ -17,17 +17,17 @@ import { BucketFilter } from "@/components/bucket-filter";
 import { BucketManager } from "@/components/bucket-manager";
 import { AddChannelDialog } from "@/components/add-channel-dialog";
 import { StatsOverview } from "@/components/stats-overview";
+import { ViewToggle } from "@/components/view-toggle";
+import { TrendsView } from "@/components/trends-view";
 import { Separator } from "@/components/ui/separator";
-import { Button } from "@/components/ui/button";
-import { Flame } from "lucide-react";
 import type { Video, Snapshot, ChannelBaseline } from "@/types/database";
 
 interface PageProps {
-  searchParams: Promise<{ channels?: string; performance?: string; bucket?: string }>;
+  searchParams: Promise<{ channels?: string; performance?: string; bucket?: string; view?: string }>;
 }
 
-export const dynamic = "force-dynamic"; // Force dynamic rendering
-export const revalidate = 0; // Disable caching
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function getVideoPerformanceRatio(
   video: Video & { snapshots: Snapshot[] },
@@ -52,24 +52,24 @@ export default async function Home({ searchParams }: PageProps) {
   const selectedChannelIds = params.channels?.split(",").filter(Boolean) || [];
   const performanceFilter = params.performance || "all";
   const selectedBucketId = params.bucket || null;
+  const currentView = (params.view === "trends" ? "trends" : "videos") as "videos" | "trends";
 
-  const [channels, allVideos, baselines, buckets, bucketChannels, trends] = await Promise.all([
+  const [channels, allVideos, baselines, buckets, bucketChannels] = await Promise.all([
     getChannels(),
-    getRecentVideos(100),
+    getRecentVideos(30),  // Last 30 days, no shorts
     getAllBaselines(),
     getBuckets(),
     getBucketChannels(),
-    getLatestTrendingTopics(),
   ]);
 
   // Determine which channel IDs to filter by
   let filterChannelIds: string[] = [];
+  let selectedBucket = null;
 
   if (selectedBucketId) {
-    // Filter by bucket
     filterChannelIds = getChannelIdsForBucket(selectedBucketId, bucketChannels);
+    selectedBucket = buckets.find(b => b.id === selectedBucketId);
   } else if (selectedChannelIds.length > 0) {
-    // Filter by manually selected channels
     filterChannelIds = selectedChannelIds;
   }
 
@@ -82,7 +82,7 @@ export default async function Home({ searchParams }: PageProps) {
   if (performanceFilter !== "all") {
     videos = videos.filter(video => {
       const ratio = getVideoPerformanceRatio(video, baselines);
-      if (ratio === null) return false; // No data yet
+      if (ratio === null) return false;
 
       switch (performanceFilter) {
         case "above":
@@ -97,6 +97,18 @@ export default async function Home({ searchParams }: PageProps) {
     });
   }
 
+  // Get trends for selected channels (only when in trends view or to check if trends exist)
+  const trends = filterChannelIds.length > 0
+    ? await getTrendsForChannels(filterChannelIds)
+    : [];
+
+  // Get videos for trends if in trends view
+  let trendVideos: (Video & { channel: typeof channels[0]; snapshots: Snapshot[] })[] = [];
+  if (currentView === "trends" && trends.length > 0) {
+    const trendVideoIds = [...new Set(trends.flatMap(t => t.video_ids || []))];
+    trendVideos = await getVideosByIds(trendVideoIds);
+  }
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -108,15 +120,7 @@ export default async function Home({ searchParams }: PageProps) {
               Track competitor videos and detect breakout content
             </p>
           </div>
-          <div className="flex items-center gap-3">
-            <Link href="/trends">
-              <Button variant={trends.length > 0 ? "default" : "outline"} className={trends.length > 0 ? "bg-orange-500 hover:bg-orange-600" : ""}>
-                <Flame className="h-4 w-4 mr-2" />
-                Trends {trends.length > 0 && `(${trends.length})`}
-              </Button>
-            </Link>
-            <AddChannelDialog buckets={buckets} />
-          </div>
+          <AddChannelDialog buckets={buckets} />
         </div>
       </header>
 
@@ -126,7 +130,7 @@ export default async function Home({ searchParams }: PageProps) {
 
         <Separator />
 
-        {/* Buckets Section - Prominent */}
+        {/* Buckets Section */}
         <div className="rounded-xl bg-gradient-to-r from-muted/50 to-muted/30 p-6 border">
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -148,10 +152,18 @@ export default async function Home({ searchParams }: PageProps) {
           </Suspense>
         </div>
 
-        {/* Other Filters */}
-        <div className="flex flex-wrap gap-6">
-          {/* Channels (only show when no bucket selected) */}
-          {!selectedBucketId && (
+        {/* View Toggle + Filters */}
+        <div className="flex flex-wrap items-start gap-6">
+          {/* View Toggle */}
+          <div>
+            <h2 className="text-sm font-semibold mb-2 text-muted-foreground uppercase tracking-wide">View</h2>
+            <Suspense fallback={<div>Loading...</div>}>
+              <ViewToggle currentView={currentView} hasTrends={trends.length > 0} />
+            </Suspense>
+          </div>
+
+          {/* Channels (only show when no bucket selected and videos view) */}
+          {!selectedBucketId && currentView === "videos" && (
             <div className="flex-1 min-w-[200px]">
               <h2 className="text-sm font-semibold mb-2 text-muted-foreground uppercase tracking-wide">Channels</h2>
               <Suspense fallback={<div>Loading...</div>}>
@@ -163,47 +175,60 @@ export default async function Home({ searchParams }: PageProps) {
             </div>
           )}
 
-          {/* Performance */}
-          <div className="flex-1 min-w-[200px]">
-            <h2 className="text-sm font-semibold mb-2 text-muted-foreground uppercase tracking-wide">Performance</h2>
-            <Suspense fallback={<div>Loading...</div>}>
-              <PerformanceFilter currentFilter={performanceFilter} />
-            </Suspense>
-          </div>
+          {/* Performance (only in videos view) */}
+          {currentView === "videos" && (
+            <div className="flex-1 min-w-[200px]">
+              <h2 className="text-sm font-semibold mb-2 text-muted-foreground uppercase tracking-wide">Performance</h2>
+              <Suspense fallback={<div>Loading...</div>}>
+                <PerformanceFilter currentFilter={performanceFilter} />
+              </Suspense>
+            </div>
+          )}
         </div>
 
         <Separator />
 
-        {/* Video Grid */}
-        <div>
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold">
-              Recent Videos
-              <span className="font-normal text-muted-foreground ml-2">
-                ({videos.length} videos)
-              </span>
-            </h2>
-          </div>
+        {/* Content Area - Videos or Trends */}
+        {currentView === "videos" ? (
+          /* Video Grid */
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">
+                Recent Videos
+                <span className="font-normal text-muted-foreground ml-2">
+                  ({videos.length} videos)
+                </span>
+              </h2>
+            </div>
 
-          {videos.length === 0 ? (
-            <div className="text-center py-12 text-muted-foreground">
-              <p>No videos match the current filters.</p>
-              <p className="text-sm mt-1">
-                Try adjusting your filters or wait for more data to be collected.
-              </p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-              {videos.map((video) => (
-                <VideoCard
-                  key={video.video_id}
-                  video={video}
-                  baselines={baselines}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+            {videos.length === 0 ? (
+              <div className="text-center py-12 text-muted-foreground">
+                <p>No videos match the current filters.</p>
+                <p className="text-sm mt-1">
+                  Try adjusting your filters or wait for more data to be collected.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                {videos.map((video) => (
+                  <VideoCard
+                    key={video.video_id}
+                    video={video}
+                    baselines={baselines}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          /* Trends View */
+          <TrendsView
+            trends={trends}
+            videos={trendVideos}
+            baselines={baselines}
+            bucketName={selectedBucket?.name}
+          />
+        )}
       </main>
 
       {/* Footer */}
