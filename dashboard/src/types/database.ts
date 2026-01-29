@@ -133,3 +133,40 @@ export interface VideoTopic {
 export interface TrendingTopicWithDetails extends TrendingTopic {
   videos: (Video & { channel: Channel; snapshots: Snapshot[] })[];
 }
+
+// Channel Discovery Types
+export interface DiscoverySettings {
+  min_subscribers: number;
+  max_subscribers: number;
+  min_videos: number;
+  min_channel_age_days: number;
+  exclude_kids_content: boolean;
+  country_filter: string[] | null;
+  activity_check: boolean;
+  max_days_since_upload: number;
+}
+
+export interface ChannelSuggestion {
+  id: number;
+  bucket_id: string;
+  channel_id: string;
+  channel_name: string;
+  subscriber_count: number | null;
+  video_count: number | null;
+  channel_created_at: string | null;
+  thumbnail_url: string | null;
+  country: string | null;
+  matched_keywords: string[];
+  status: 'pending' | 'accepted' | 'declined';
+  suggested_at: string;
+  responded_at: string | null;
+}
+
+export interface DiscoveryResult {
+  keywords_used: string[];
+  channels_found: number;
+  channels_filtered: number;
+  suggestions_saved: number;
+  filter_stats: Record<string, number>;
+  error?: string;
+}

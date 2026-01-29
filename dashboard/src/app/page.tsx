@@ -19,6 +19,7 @@ import { AddChannelDialog } from "@/components/add-channel-dialog";
 import { StatsOverview } from "@/components/stats-overview";
 import { ViewToggle } from "@/components/view-toggle";
 import { TrendsView } from "@/components/trends-view";
+import { ChannelDiscovery } from "@/components/channel-discovery";
 import { Separator } from "@/components/ui/separator";
 import type { Video, Snapshot, ChannelBaseline } from "@/types/database";
 
@@ -161,6 +162,14 @@ export default async function Home({ searchParams }: PageProps) {
               <ViewToggle currentView={currentView} hasTrends={trends.length > 0} />
             </Suspense>
           </div>
+
+          {/* Channel Discovery (only when bucket is selected) */}
+          {selectedBucket && (
+            <div>
+              <h2 className="text-sm font-semibold mb-2 text-muted-foreground uppercase tracking-wide">Discovery</h2>
+              <ChannelDiscovery bucket={selectedBucket} />
+            </div>
+          )}
 
           {/* Channels (only show when no bucket selected and videos view) */}
           {!selectedBucketId && currentView === "videos" && (

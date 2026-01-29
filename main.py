@@ -322,6 +322,196 @@ async def get_trends():
     }
 
 
+# ============== Channel Discovery Endpoints ==============
+
+@app.get("/discovery/settings/{bucket_id}")
+async def get_discovery_settings_endpoint(bucket_id: str):
+    """
+    Get discovery settings for a bucket.
+    """
+    from src.database.discovery import get_discovery_settings
+
+    settings = get_discovery_settings(bucket_id)
+    return {
+        "bucket_id": bucket_id,
+        "settings": settings,
+    }
+
+
+@app.put("/discovery/settings/{bucket_id}")
+async def update_discovery_settings_endpoint(bucket_id: str, request: Request):
+    """
+    Update discovery settings for a bucket.
+    """
+    from src.database.discovery import save_discovery_settings
+
+    body = await request.json()
+
+    success = save_discovery_settings(bucket_id, body)
+
+    if success:
+        return {"status": "success", "message": "Settings updated"}
+    else:
+        return {"status": "error", "message": "Failed to update settings"}
+
+
+@app.post("/discover-channels/{bucket_id}")
+async def discover_channels_endpoint(bucket_id: str, request: Request):
+    """
+    Run channel discovery for a bucket.
+
+    Optional body parameters:
+    - keywords: list[str] - Custom keywords to search (if not provided, uses trending topics)
+    - max_results_per_keyword: int - Max results per keyword (default 25)
+    - clear_pending: bool - Clear existing pending suggestions first (default true)
+    """
+    from src.discovery.channel_discovery import discover_channels
+
+    logger.info(f"Channel discovery triggered for bucket {bucket_id}")
+
+    # Parse optional body
+    try:
+        body = await request.json()
+    except:
+        body = {}
+
+    keywords = body.get("keywords")
+    max_results = body.get("max_results_per_keyword", 25)
+    clear_pending = body.get("clear_pending", True)
+
+    try:
+        result = discover_channels(
+            bucket_id=bucket_id,
+            keywords=keywords,
+            max_results_per_keyword=max_results,
+            clear_pending=clear_pending,
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"Channel discovery failed: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/discovery/keywords/{bucket_id}")
+async def get_discovery_keywords_endpoint(bucket_id: str):
+    """
+    Get suggested keywords for a bucket (from trending topics).
+    """
+    from src.discovery.channel_discovery import get_bucket_trending_keywords
+
+    keywords = get_bucket_trending_keywords(bucket_id, limit=10)
+    return {
+        "bucket_id": bucket_id,
+        "keywords": keywords,
+    }
+
+
+@app.get("/suggestions/{bucket_id}")
+async def get_suggestions_endpoint(bucket_id: str, status: str = "pending"):
+    """
+    Get channel suggestions for a bucket.
+
+    Query params:
+    - status: 'pending', 'accepted', 'declined', or 'all' (default: 'pending')
+    """
+    from src.database.discovery import get_pending_suggestions, get_all_suggestions
+
+    if status == "all":
+        suggestions = get_all_suggestions(bucket_id)
+    elif status == "pending":
+        suggestions = get_pending_suggestions(bucket_id)
+    else:
+        # Filter by specific status
+        all_suggestions = get_all_suggestions(bucket_id)
+        suggestions = [s for s in all_suggestions if s["status"] == status]
+
+    return {
+        "bucket_id": bucket_id,
+        "status_filter": status,
+        "count": len(suggestions),
+        "suggestions": suggestions,
+    }
+
+
+@app.post("/suggestions/{suggestion_id}/accept")
+async def accept_suggestion_endpoint(suggestion_id: int):
+    """
+    Accept a channel suggestion and add it to tracking.
+    """
+    from src.database.discovery import accept_suggestion
+    from src.database.channels import add_channel, get_channel
+    from src.database.connection import get_client
+
+    # Accept the suggestion
+    channel_info = accept_suggestion(suggestion_id)
+
+    if not channel_info:
+        return {"status": "error", "message": "Suggestion not found"}
+
+    # Check if channel already exists
+    existing = get_channel(channel_info["channel_id"])
+    if existing:
+        return {
+            "status": "warning",
+            "message": "Channel already exists in tracking",
+            "channel": existing,
+        }
+
+    # Add channel to tracking
+    result = add_channel(
+        channel_id=channel_info["channel_id"],
+        channel_name=channel_info["channel_name"],
+        subscriber_count=channel_info["subscriber_count"],
+        total_videos=channel_info.get("video_count", 0),
+    )
+
+    if not result:
+        return {"status": "error", "message": "Failed to add channel to tracking"}
+
+    # Add channel to the bucket
+    client = get_client()
+    try:
+        client.table("bucket_channels").insert({
+            "bucket_id": channel_info["bucket_id"],
+            "channel_id": channel_info["channel_id"],
+        }).execute()
+    except Exception as e:
+        logger.warning(f"Channel added but failed to add to bucket: {e}")
+
+    # Subscribe to WebSub if in websub mode
+    if Config.DISCOVERY_MODE == "websub" and Config.WEBSUB_CALLBACK_URL:
+        try:
+            from src.discovery.websub import WebSubSubscription
+            sub = WebSubSubscription()
+            sub.subscribe(channel_info["channel_id"])
+        except Exception as e:
+            logger.warning(f"WebSub subscription failed: {e}")
+
+    logger.info(f"Accepted suggestion {suggestion_id}: added channel {channel_info['channel_name']}")
+
+    return {
+        "status": "success",
+        "message": f"Channel {channel_info['channel_name']} added to tracking",
+        "channel": result,
+    }
+
+
+@app.post("/suggestions/{suggestion_id}/decline")
+async def decline_suggestion_endpoint(suggestion_id: int):
+    """
+    Decline a channel suggestion.
+    """
+    from src.database.discovery import decline_suggestion
+
+    success = decline_suggestion(suggestion_id)
+
+    if success:
+        return {"status": "success", "message": "Suggestion declined"}
+    else:
+        return {"status": "error", "message": "Failed to decline suggestion"}
+
+
 def test_connection():
     """Test Supabase and YouTube API connections."""
     from src.database.connection import get_client

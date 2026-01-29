@@ -188,6 +188,166 @@ class YouTubeAPI:
         except Exception as e:
             raise YouTubeAPIError(f"Error fetching channel info: {e}")
 
+    def get_channel_full_details(self, channel_id: str) -> Optional[dict]:
+        """
+        Get full channel details for discovery filtering.
+
+        Returns:
+            dict with all fields needed for filtering:
+            channel_id, channel_name, subscriber_count, video_count,
+            published_at, country, thumbnail_url, hidden_subscriber_count,
+            made_for_kids
+        """
+        try:
+            data = self._make_request("channels", {
+                "part": "snippet,statistics,status",
+                "id": channel_id,
+            })
+
+            if not data.get("items"):
+                return None
+
+            item = data["items"][0]
+            snippet = item["snippet"]
+            stats = item["statistics"]
+            status = item.get("status", {})
+
+            return {
+                "channel_id": channel_id,
+                "channel_name": snippet["title"],
+                "subscriber_count": int(stats.get("subscriberCount", 0)),
+                "video_count": int(stats.get("videoCount", 0)),
+                "published_at": snippet.get("publishedAt"),
+                "country": snippet.get("country"),
+                "thumbnail_url": snippet.get("thumbnails", {}).get("default", {}).get("url"),
+                "hidden_subscriber_count": stats.get("hiddenSubscriberCount", False),
+                "made_for_kids": status.get("madeForKids", False),
+            }
+
+        except httpx.HTTPStatusError as e:
+            raise YouTubeAPIError(f"HTTP error fetching channel details: {e}")
+        except Exception as e:
+            raise YouTubeAPIError(f"Error fetching channel details: {e}")
+
+    def get_channels_full_details(self, channel_ids: list[str]) -> list[dict]:
+        """
+        Get full details for multiple channels in one API call.
+
+        Args:
+            channel_ids: List of channel IDs (max 50 per call)
+
+        Returns:
+            List of channel detail dicts
+        """
+        if not channel_ids:
+            return []
+
+        # API allows up to 50 IDs per request
+        results = []
+        for i in range(0, len(channel_ids), 50):
+            batch = channel_ids[i:i+50]
+            try:
+                data = self._make_request("channels", {
+                    "part": "snippet,statistics,status",
+                    "id": ",".join(batch),
+                })
+
+                for item in data.get("items", []):
+                    snippet = item["snippet"]
+                    stats = item["statistics"]
+                    status = item.get("status", {})
+
+                    results.append({
+                        "channel_id": item["id"],
+                        "channel_name": snippet["title"],
+                        "subscriber_count": int(stats.get("subscriberCount", 0)),
+                        "video_count": int(stats.get("videoCount", 0)),
+                        "published_at": snippet.get("publishedAt"),
+                        "country": snippet.get("country"),
+                        "thumbnail_url": snippet.get("thumbnails", {}).get("default", {}).get("url"),
+                        "hidden_subscriber_count": stats.get("hiddenSubscriberCount", False),
+                        "made_for_kids": status.get("madeForKids", False),
+                    })
+
+            except Exception as e:
+                raise YouTubeAPIError(f"Error fetching channels batch: {e}")
+
+        return results
+
+    def search_channels(self, query: str, max_results: int = 25) -> list[dict]:
+        """
+        Search for channels by keyword.
+
+        Args:
+            query: Search query (keyword, topic, etc.)
+            max_results: Maximum results to return (default 25, max 50)
+
+        Returns:
+            List of dicts with channel_id and channel_name (basic info only).
+            Use get_channels_full_details() to get complete info for filtering.
+
+        Note: Costs 100 quota units per call.
+        """
+        try:
+            data = self._make_request("search", {
+                "part": "snippet",
+                "q": query,
+                "type": "channel",
+                "maxResults": min(max_results, 50),
+            })
+
+            results = []
+            for item in data.get("items", []):
+                snippet = item["snippet"]
+                results.append({
+                    "channel_id": snippet["channelId"],
+                    "channel_name": snippet["title"],
+                    "thumbnail_url": snippet.get("thumbnails", {}).get("default", {}).get("url"),
+                })
+
+            return results
+
+        except httpx.HTTPStatusError as e:
+            raise YouTubeAPIError(f"HTTP error searching channels: {e}")
+        except Exception as e:
+            raise YouTubeAPIError(f"Error searching channels: {e}")
+
+    def get_channel_latest_upload(self, channel_id: str) -> Optional[str]:
+        """
+        Get the publish date of a channel's most recent upload.
+
+        Used for activity check filter.
+
+        Returns:
+            ISO 8601 date string of latest video, or None if no videos.
+        """
+        try:
+            # First get the uploads playlist ID
+            data = self._make_request("channels", {
+                "part": "contentDetails",
+                "id": channel_id,
+            })
+
+            if not data.get("items"):
+                return None
+
+            uploads_playlist = data["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+
+            # Get the most recent video from uploads playlist
+            playlist_data = self._make_request("playlistItems", {
+                "part": "snippet",
+                "playlistId": uploads_playlist,
+                "maxResults": 1,
+            })
+
+            if not playlist_data.get("items"):
+                return None
+
+            return playlist_data["items"][0]["snippet"]["publishedAt"]
+
+        except Exception:
+            return None
+
     def resolve_channel_url(self, url: str) -> Optional[dict]:
         """
         Resolve any YouTube channel URL to channel info.

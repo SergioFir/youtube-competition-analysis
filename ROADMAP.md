@@ -29,11 +29,11 @@ Build an internal competitive-intelligence system for YouTube content that answe
 |-------|------|--------|-------------|
 | 1 | Tracking & Baselines | **COMPLETE** | Observe videos, capture snapshots, build baselines |
 | 1.5 | Deployment & Dashboard | **COMPLETE** | Deploy tracker, seed data, build internal UI |
-| 2 | Trend Detection | **CURRENT** | Detect hot topics across multiple channels |
-| 3 | HIT Detection | NOT STARTED | Detect individual breakout videos |
-| 4 | Channel Discovery | NOT STARTED | Auto-discover and prune competitor channels |
+| 2 | Trend Detection | **COMPLETE** | Detect hot topics across multiple channels |
+| 3 | Channel Discovery | **CURRENT** | Discover competitor channels via trending topics |
+| 4 | HIT Detection | NOT STARTED | Detect individual breakout videos |
 
-**Current: Trend Detection is next.**
+**Current: Channel Discovery is in progress.**
 
 ---
 
@@ -202,7 +202,8 @@ youtube-tracker/
 │   │   ├── channels.py           # Channel operations
 │   │   ├── videos.py             # Video operations
 │   │   ├── snapshots.py          # Snapshot operations
-│   │   └── baselines.py          # Baseline calculations
+│   │   ├── baselines.py          # Baseline calculations
+│   │   └── topics.py             # Topic/trend operations
 │   │
 │   ├── youtube/
 │   │   ├── __init__.py
@@ -215,6 +216,13 @@ youtube-tracker/
 │   │   ├── polling.py            # RSS polling (dev mode)
 │   │   └── websub.py             # WebSub handler (prod mode)
 │   │
+│   ├── trends/
+│   │   ├── __init__.py
+│   │   ├── transcript.py         # YouTube transcript fetcher
+│   │   ├── extractor.py          # AI topic extraction
+│   │   ├── clustering.py         # AI topic clustering
+│   │   └── detector.py           # Trend detection orchestration
+│   │
 │   ├── scheduler/
 │   │   ├── __init__.py
 │   │   └── snapshot_worker.py    # Processes scheduled snapshots
@@ -225,7 +233,10 @@ youtube-tracker/
 │       ├── baseline_job.py       # Updates channel baselines
 │       └── health_job.py         # Monitors snapshot coverage
 │
-├── main.py                       # Entry point
+├── scripts/
+│   └── backfill_topics.py        # Backfill topics for existing videos
+│
+├── main.py                       # Entry point (includes /run-trends endpoint)
 ├── requirements.txt
 ├── .env.example
 └── ROADMAP.md                    # This file
@@ -283,7 +294,7 @@ youtube-tracker/
 
 ---
 
-## Part 1.5: Deployment & Dashboard (CURRENT)
+## Part 1.5: Deployment & Dashboard ✅
 
 ### Phase 8: Deploy Tracker to Railway
 - [x] **8.1** Add `source` column to `channel_baselines` table
@@ -325,7 +336,7 @@ youtube-tracker/
 
 ---
 
-## Part 2: Trend Detection (CURRENT)
+## Part 2: Trend Detection ✅
 
 ### Goal
 Detect hot topics that are working across multiple channels, so we can create similar content while the trend is still hot.
@@ -333,7 +344,7 @@ Detect hot topics that are working across multiple channels, so we can create si
 ### Trend Detection Rules
 ```
 A topic is TRENDING if:
-  - At least 3 different channels posted about it
+  - At least 2 different channels in the bucket posted about it
   - Only counts videos performing >= 1.5x baseline
   - Within the last 14 days
 ```
@@ -342,20 +353,27 @@ A topic is TRENDING if:
 
 1. **Topic Extraction (per video at 24h snapshot)**
    - Fetch transcript via `youtube-transcript-api`
-   - Fallback to title + description if no transcript
+   - Fallback to title only if no transcript
    - Send to AI (DeepSeek via OpenRouter): "Extract 1-3 specific topics"
    - Store raw topics in `video_topics` table
 
-2. **Topic Clustering (daily job)**
-   - Gather all topics from videos in last 14 days with 1.5x+ performance
-   - Send to AI: "Group similar topics into clusters"
-   - Store normalized clusters in `topic_clusters` table
+2. **Topic Clustering (daily job, per bucket)**
+   - For each bucket separately:
+     - Gather topics from videos in last 14 days with 1.5x+ performance
+     - Send to AI with bucket context: "Group similar topics into clusters"
+     - Store normalized clusters with `bucket_id` in `topic_clusters` table
+   - This prevents mixing unrelated niches (e.g., AI and construction)
 
 3. **Trend Calculation (daily job)**
    - For each cluster, count unique channels
-   - Filter clusters with 3+ channels
+   - Filter clusters with 2+ channels (bucket-specific threshold)
    - Calculate avg performance, video count
-   - Store in `trending_topics` table
+   - Store in `trending_topics` table with `bucket_id`
+
+4. **Scheduled Execution**
+   - Daily job runs at 2:00 AM UTC
+   - Manual trigger available via `/run-trends` endpoint
+   - Clears old trends before each run (regenerates fresh)
 
 ### Database Tables
 
@@ -371,6 +389,7 @@ extracted_at        TIMESTAMP DEFAULT now()
 ```sql
 id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
 normalized_name     TEXT NOT NULL           -- "ChatGPT Prompting"
+bucket_id           UUID REFERENCES buckets(id)  -- Per-bucket clustering
 created_at          TIMESTAMP DEFAULT now()
 updated_at          TIMESTAMP DEFAULT now()
 ```
@@ -387,6 +406,7 @@ PRIMARY KEY (cluster_id, topic)
 ```sql
 id                  SERIAL PRIMARY KEY
 cluster_id          UUID REFERENCES topic_clusters(id)
+bucket_id           UUID REFERENCES buckets(id)  -- Per-bucket trends
 channel_count       INTEGER NOT NULL
 video_count         INTEGER NOT NULL
 avg_performance     DECIMAL(5,2)            -- e.g., 2.3 = 2.3x baseline
@@ -396,28 +416,146 @@ period_start        TIMESTAMP               -- 14 days ago
 period_end          TIMESTAMP               -- now
 ```
 
-### Phase 11: Trend Detection Implementation
-- [ ] **11.1** Create database tables for topics and trends
-- [ ] **11.2** Add `youtube-transcript-api` to requirements
-- [ ] **11.3** Implement transcript fetcher with fallback
-- [ ] **11.4** Set up OpenRouter client for AI calls
-- [ ] **11.5** Implement topic extraction (per video)
-- [ ] **11.6** Implement topic clustering (daily job)
-- [ ] **11.7** Implement trend calculation
-- [ ] **11.8** Create backfill script for existing videos
-- [ ] **11.9** Add trending topics page to dashboard
-- [ ] **11.10** Test with real data
+### Python Modules Added
+
+```
+src/trends/
+├── __init__.py
+├── transcript.py      # Fetches YouTube transcripts
+├── extractor.py       # AI topic extraction via OpenRouter
+├── clustering.py      # AI topic clustering with retry logic
+└── detector.py        # Main trend detection orchestration
+
+src/database/
+└── topics.py          # Database operations for topics/trends
+
+scripts/
+└── backfill_topics.py # Backfill topics for existing videos
+```
+
+### Dashboard Updates
+
+- View toggle on main page: Videos | Trends
+- Trends view shows per-bucket trend cards in 2-column grid
+- Trend bubble visualization with size based on performance
+- Trend cards expand to show contributing videos with thumbnails
+- Trends only visible when a bucket is selected
+
+### Phase 11: Trend Detection Implementation ✅
+- [x] **11.1** Create database tables for topics and trends
+- [x] **11.2** Add `youtube-transcript-api` to requirements
+- [x] **11.3** Implement transcript fetcher with fallback
+- [x] **11.4** Set up OpenRouter client for AI calls
+- [x] **11.5** Implement topic extraction (per video)
+- [x] **11.6** Implement topic clustering (daily job, per bucket)
+- [x] **11.7** Implement trend calculation
+- [x] **11.8** Create backfill script for existing videos
+- [x] **11.9** Add trends view to dashboard (view toggle, bubble viz, trend cards)
+- [x] **11.10** Test with real data
+- [x] **11.11** Add daily scheduled job (2 AM UTC)
+- [x] **11.12** Add manual trigger endpoint (`/run-trends`)
 
 ---
 
-## Part 3: HIT Detection (After Trend Detection)
+## Part 3: Channel Discovery (CURRENT)
 
-### Phase 12: HIT Detection Logic
-- [ ] **12.1** Define HIT thresholds (relative velocity > 2.0, etc.)
-- [ ] **12.2** Implement HIT calculation in Python
-- [ ] **12.3** Store HIT flags in database
-- [ ] **12.4** Add HIT indicators to dashboard
-- [ ] **12.5** Test with real data
+### Goal
+Help users discover new competitor channels based on trending topics in their buckets. User-triggered, per-bucket, with configurable filters.
+
+### How It Works
+
+1. **User triggers discovery** on a bucket
+2. **System gets keywords** from trending topic clusters for that bucket
+3. **User can edit keywords** before searching
+4. **YouTube Search API** finds channels matching keywords
+5. **Filter channels** by user-configurable criteria
+6. **Present suggestions** to user for accept/decline
+7. **Accepted channels** are added to the bucket
+
+### Discovery Filters
+
+#### Hard Filters (Always Applied)
+```
+- Not already tracked in our database
+- Subscriber count visible (hiddenSubscriberCount = false)
+```
+
+#### Configurable Filters (User can adjust all defaults)
+```
+┌─────────────────────────┬──────────────┬─────────────────┐
+│ Filter                  │ Default      │ Range           │
+├─────────────────────────┼──────────────┼─────────────────┤
+│ Min Subscribers         │ 10,000       │ 0 - 100,000,000 │
+│ Max Subscribers         │ 5,000,000    │ 0 - 100,000,000 │
+│ Min Videos              │ 20           │ 0 - 10,000      │
+│ Min Channel Age (days)  │ 180          │ 0 - 3,650       │
+│ Exclude Kids Content    │ true         │ true/false      │
+│ Country Filter          │ null (any)   │ Country codes   │
+├─────────────────────────┼──────────────┼─────────────────┤
+│ Activity Check          │ false (off)  │ true/false      │
+│ └─ Max Days Since Upload│ 60           │ 1 - 365         │
+└─────────────────────────┴──────────────┴─────────────────┘
+```
+
+### Database Tables
+
+#### Table: `bucket_discovery_settings`
+```sql
+bucket_id               UUID PRIMARY KEY REFERENCES buckets(id) ON DELETE CASCADE
+min_subscribers         INTEGER DEFAULT 10000
+max_subscribers         INTEGER DEFAULT 5000000
+min_videos              INTEGER DEFAULT 20
+min_channel_age_days    INTEGER DEFAULT 180
+exclude_kids_content    BOOLEAN DEFAULT true
+country_filter          TEXT[] DEFAULT NULL    -- NULL = any country
+activity_check          BOOLEAN DEFAULT false
+max_days_since_upload   INTEGER DEFAULT 60
+updated_at              TIMESTAMP DEFAULT now()
+```
+
+#### Table: `channel_suggestions`
+```sql
+id                      SERIAL PRIMARY KEY
+bucket_id               UUID REFERENCES buckets(id) ON DELETE CASCADE
+channel_id              TEXT NOT NULL          -- YouTube channel ID
+channel_name            TEXT NOT NULL
+subscriber_count        INTEGER
+video_count             INTEGER
+published_at            TIMESTAMP              -- Channel creation date
+thumbnail_url           TEXT
+matched_keywords        TEXT[]                 -- Keywords that found this channel
+status                  TEXT DEFAULT 'pending' -- 'pending' | 'accepted' | 'declined'
+suggested_at            TIMESTAMP DEFAULT now()
+responded_at            TIMESTAMP
+```
+
+### API Quota Consideration
+- YouTube Search API costs 100 units per call
+- Daily limit: 10,000 units = ~100 searches/day
+- Strategy: Search by topic cluster name (not individual tags)
+- Batch: Max 3-5 searches per discovery run
+
+### Phase 12: Channel Discovery Implementation
+- [x] **12.1** Create database tables (`bucket_discovery_settings`, `channel_suggestions`)
+- [x] **12.2** Add YouTube Search API wrapper (`search_channels` method)
+- [x] **12.3** Implement channel details fetcher (`get_channel_full_details`, `get_channels_full_details`)
+- [x] **12.4** Implement filter logic (all configurable criteria)
+- [x] **12.5** Create discovery endpoints (`/discover-channels/{bucket_id}`, `/suggestions/{bucket_id}`, etc.)
+- [x] **12.6** Add discovery settings UI to dashboard (per bucket)
+- [x] **12.7** Add channel suggestions UI (accept/decline interface)
+- [x] **12.8** Implement accept/decline actions
+- [ ] **12.9** Test with real data
+
+---
+
+## Part 4: HIT Detection (NOT STARTED)
+
+### Phase 13: HIT Detection Logic
+- [ ] **13.1** Define HIT thresholds (relative velocity > 2.0, etc.)
+- [ ] **13.2** Implement HIT calculation in Python
+- [ ] **13.3** Store HIT flags in database
+- [ ] **13.4** Add HIT indicators to dashboard
+- [ ] **13.5** Test with real data
 
 ### HIT Detection Rules (Preview)
 ```
@@ -521,6 +659,10 @@ BASELINE_UPDATE_HOURS=12
 # WebSub (required when DISCOVERY_MODE=websub)
 WEBSUB_CALLBACK_URL=https://creatrr.app/webhooks/youtube
 PORT=8080  # Railway sets this automatically
+
+# Trend Detection (required for Part 2)
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_MODEL=deepseek/deepseek-chat  # Or other model
 ```
 
 ---
@@ -535,6 +677,8 @@ PORT=8080  # Railway sets this automatically
 | 2024-01-20 | Added Part 1.5: Deployment & Dashboard. Plan to deploy tracker to Railway, seed with VidIQ data, build Next.js dashboard. Added `source` column to baselines schema for tracking manual vs calculated data. |
 | 2024-01-23 | Implemented WebSub for real-time video notifications. Added FastAPI web server, webhook endpoints, subscription management. Domain: creatrr.app |
 | 2024-01-26 | Phase 9 (Seed Data) complete: 11 channels imported from VidIQ. Phase 10 (Dashboard) complete: Next.js + shadcn/ui deployed to Vercel. Added bucket system for channel grouping, multi-channel filter, performance filter, add channel dialog. Added WebSub latency tracking. Part 1.5 complete - ready for HIT Detection. |
+| 2024-01-29 | **Part 2 (Trend Detection) complete.** Implemented per-bucket trend detection to avoid mixing unrelated niches. Topics extracted via AI from title + transcript. Clustering uses OpenRouter (DeepSeek) with bucket context. Daily job at 2 AM UTC, manual trigger via `/run-trends`. Dashboard updated with view toggle (Videos/Trends), bubble visualization, trend cards. Shorts excluded from display, changed to 30-day window. |
+| 2024-01-29 | **Reordered: Channel Discovery moved before HIT Detection.** Part 3 is now Channel Discovery (user-triggered, per-bucket, searches by trending topics, configurable filters). Part 4 is HIT Detection. |
 
 ---
 

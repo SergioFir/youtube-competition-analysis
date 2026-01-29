@@ -1,4 +1,7 @@
-# Discovery module
-from .polling import PollingDiscovery
+"""
+Discovery module for finding new channels.
+"""
 
-__all__ = ["PollingDiscovery"]
+from src.discovery.channel_discovery import discover_channels, get_bucket_trending_keywords
+
+__all__ = ["discover_channels", "get_bucket_trending_keywords"]

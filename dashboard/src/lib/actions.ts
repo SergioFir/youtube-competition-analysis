@@ -214,3 +214,164 @@ export async function addChannel(
 export async function resolveChannelPreview(channelUrl: string): Promise<ChannelInfo | null> {
   return resolveChannel(channelUrl);
 }
+
+// ============== Channel Discovery Actions ==============
+
+import type { DiscoverySettings, ChannelSuggestion, DiscoveryResult } from "@/types/database";
+
+const TRACKER_API_URL = process.env.TRACKER_API_URL || "http://localhost:8080";
+
+export async function getDiscoverySettingsAction(bucketId: string): Promise<DiscoverySettings> {
+  const { data, error } = await (supabase
+    .from("bucket_discovery_settings") as any)
+    .select("*")
+    .eq("bucket_id", bucketId)
+    .single();
+
+  if (error || !data) {
+    return {
+      min_subscribers: 10000,
+      max_subscribers: 5000000,
+      min_videos: 20,
+      min_channel_age_days: 180,
+      exclude_kids_content: true,
+      country_filter: null,
+      activity_check: false,
+      max_days_since_upload: 60,
+    };
+  }
+
+  return {
+    min_subscribers: data.min_subscribers,
+    max_subscribers: data.max_subscribers,
+    min_videos: data.min_videos,
+    min_channel_age_days: data.min_channel_age_days,
+    exclude_kids_content: data.exclude_kids_content,
+    country_filter: data.country_filter,
+    activity_check: data.activity_check,
+    max_days_since_upload: data.max_days_since_upload,
+  };
+}
+
+export async function saveDiscoverySettingsAction(
+  bucketId: string,
+  settings: DiscoverySettings
+): Promise<{ success: boolean; error?: string }> {
+  const { error } = await (supabase
+    .from("bucket_discovery_settings") as any)
+    .upsert({
+      bucket_id: bucketId,
+      ...settings,
+      updated_at: new Date().toISOString(),
+    });
+
+  if (error) {
+    console.error("Error saving discovery settings:", error);
+    return { success: false, error: error.message };
+  }
+
+  return { success: true };
+}
+
+export async function runDiscoveryAction(
+  bucketId: string,
+  keywords?: string[]
+): Promise<DiscoveryResult> {
+  try {
+    const response = await fetch(`${TRACKER_API_URL}/discover-channels/${bucketId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        keywords: keywords?.length ? keywords : undefined,
+        max_results_per_keyword: 25,
+        clear_pending: true,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Discovery request failed: ${response.status}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error("Error running discovery:", error);
+    return {
+      keywords_used: [],
+      channels_found: 0,
+      channels_filtered: 0,
+      suggestions_saved: 0,
+      filter_stats: {},
+      error: error instanceof Error ? error.message : "Discovery failed",
+    };
+  }
+}
+
+export async function getDiscoveryKeywordsAction(bucketId: string): Promise<string[]> {
+  try {
+    const response = await fetch(`${TRACKER_API_URL}/discovery/keywords/${bucketId}`);
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.keywords || [];
+  } catch (error) {
+    console.error("Error fetching keywords:", error);
+    return [];
+  }
+}
+
+export async function acceptSuggestionAction(
+  suggestionId: number
+): Promise<{ success: boolean; error?: string; channel?: ChannelInfo }> {
+  try {
+    const response = await fetch(`${TRACKER_API_URL}/suggestions/${suggestionId}/accept`, {
+      method: "POST",
+    });
+
+    const data = await response.json();
+
+    if (data.status === "success") {
+      return { success: true, channel: data.channel };
+    } else {
+      return { success: false, error: data.message };
+    }
+  } catch (error) {
+    console.error("Error accepting suggestion:", error);
+    return { success: false, error: "Failed to accept suggestion" };
+  }
+}
+
+export async function declineSuggestionAction(
+  suggestionId: number
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const response = await fetch(`${TRACKER_API_URL}/suggestions/${suggestionId}/decline`, {
+      method: "POST",
+    });
+
+    const data = await response.json();
+
+    if (data.status === "success") {
+      return { success: true };
+    } else {
+      return { success: false, error: data.message };
+    }
+  } catch (error) {
+    console.error("Error declining suggestion:", error);
+    return { success: false, error: "Failed to decline suggestion" };
+  }
+}
+
+export async function getPendingSuggestionsAction(bucketId: string): Promise<ChannelSuggestion[]> {
+  const { data, error } = await (supabase
+    .from("channel_suggestions") as any)
+    .select("*")
+    .eq("bucket_id", bucketId)
+    .eq("status", "pending")
+    .order("suggested_at", { ascending: false });
+
+  if (error) {
+    console.error("Error fetching suggestions:", error);
+    return [];
+  }
+
+  return (data || []) as ChannelSuggestion[];
+}

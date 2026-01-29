@@ -364,3 +364,95 @@ export async function getTrendsForBucket(bucketId: string): Promise<TrendingTopi
 
   return (data || []) as TrendingTopic[];
 }
+
+// Channel Discovery functions
+import type { DiscoverySettings, ChannelSuggestion } from "@/types/database";
+
+const DEFAULT_DISCOVERY_SETTINGS: DiscoverySettings = {
+  min_subscribers: 10000,
+  max_subscribers: 5000000,
+  min_videos: 20,
+  min_channel_age_days: 180,
+  exclude_kids_content: true,
+  country_filter: null,
+  activity_check: false,
+  max_days_since_upload: 60,
+};
+
+export async function getDiscoverySettings(bucketId: string): Promise<DiscoverySettings> {
+  const { data, error } = await (supabase
+    .from("bucket_discovery_settings") as any)
+    .select("*")
+    .eq("bucket_id", bucketId)
+    .single();
+
+  if (error || !data) {
+    return DEFAULT_DISCOVERY_SETTINGS;
+  }
+
+  return {
+    min_subscribers: data.min_subscribers,
+    max_subscribers: data.max_subscribers,
+    min_videos: data.min_videos,
+    min_channel_age_days: data.min_channel_age_days,
+    exclude_kids_content: data.exclude_kids_content,
+    country_filter: data.country_filter,
+    activity_check: data.activity_check,
+    max_days_since_upload: data.max_days_since_upload,
+  };
+}
+
+export async function saveDiscoverySettings(bucketId: string, settings: DiscoverySettings): Promise<boolean> {
+  const { error } = await (supabase
+    .from("bucket_discovery_settings") as any)
+    .upsert({
+      bucket_id: bucketId,
+      ...settings,
+      updated_at: new Date().toISOString(),
+    });
+
+  if (error) {
+    console.error("Error saving discovery settings:", error);
+    return false;
+  }
+
+  return true;
+}
+
+export async function getChannelSuggestions(bucketId: string, status: string = "pending"): Promise<ChannelSuggestion[]> {
+  let query = (supabase
+    .from("channel_suggestions") as any)
+    .select("*")
+    .eq("bucket_id", bucketId)
+    .order("suggested_at", { ascending: false });
+
+  if (status !== "all") {
+    query = query.eq("status", status);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    console.error("Error fetching suggestions:", error);
+    return [];
+  }
+
+  return (data || []) as ChannelSuggestion[];
+}
+
+export async function updateSuggestionStatus(suggestionId: number, status: 'accepted' | 'declined'): Promise<boolean> {
+  const { error } = await (supabase
+    .from("channel_suggestions") as any)
+    .update({
+      status,
+      responded_at: new Date().toISOString(),
+    })
+    .eq("id", suggestionId);
+
+  if (error) {
+    console.error("Error updating suggestion:", error);
+    return false;
+  }
+
+  return true;
+}
