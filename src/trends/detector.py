@@ -11,8 +11,10 @@ from src.config import Config
 from src.database.topics import (
     get_topics_for_bucket,
     save_cluster,
-    save_trending_topic,
-    clear_old_trends,
+    get_existing_topic_clusters,
+    get_cluster_name,
+    upsert_trending_topic,
+    mark_stale_trends_inactive,
 )
 from src.trends.clustering import cluster_topics
 
@@ -48,6 +50,7 @@ def get_all_buckets() -> list[dict]:
 def detect_trends_for_bucket(bucket: dict) -> list[dict]:
     """
     Run trend detection for a single bucket.
+    Uses persistent clustering - only new topics are sent to AI.
 
     Args:
         bucket: Bucket dict with id, name, and channel_ids
@@ -70,42 +73,67 @@ def detect_trends_for_bucket(bucket: dict) -> list[dict]:
 
     if not topic_data:
         logger.info(f"No qualifying topics for bucket '{bucket_name}'")
+        # Mark all existing trends as inactive since no qualifying videos
+        mark_stale_trends_inactive(bucket_id, [])
         return []
 
     logger.info(f"Found {len(topic_data)} topic entries for '{bucket_name}'")
-
-    # Extract just the topic strings for clustering
-    all_topics = [t["topic"] for t in topic_data]
-
-    # Cluster similar topics (with bucket context in prompt)
-    logger.info(f"Clustering topics for '{bucket_name}'...")
-    clusters = cluster_topics(all_topics, context=f"These are topics from {bucket_name} YouTube channels")
-
-    if not clusters.get("clusters"):
-        logger.info(f"No clusters generated for '{bucket_name}'")
-        return []
-
-    logger.info(f"Created {len(clusters['clusters'])} clusters for '{bucket_name}'")
 
     # Build lookup: topic -> video data
     topic_to_videos = defaultdict(list)
     for entry in topic_data:
         topic_to_videos[entry["topic"]].append(entry)
 
-    # Analyze each cluster
+    # Get existing topic -> cluster mapping
+    existing_topic_to_cluster = get_existing_topic_clusters(bucket_id)
+    logger.info(f"Found {len(existing_topic_to_cluster)} existing topic mappings")
+
+    # Separate topics into known (already clustered) and new
+    all_topics = list(topic_to_videos.keys())
+    known_topics = [t for t in all_topics if t in existing_topic_to_cluster]
+    new_topics = [t for t in all_topics if t not in existing_topic_to_cluster]
+
+    logger.info(f"Topics: {len(known_topics)} known, {len(new_topics)} new")
+
+    # Build cluster -> topics mapping from known topics
+    cluster_to_topics = defaultdict(list)
+    for topic in known_topics:
+        cluster_id = existing_topic_to_cluster[topic]
+        cluster_to_topics[cluster_id].append(topic)
+
+    # Only cluster NEW topics with AI
+    if new_topics:
+        logger.info(f"Clustering {len(new_topics)} new topics for '{bucket_name}'...")
+        new_clusters = cluster_topics(new_topics, context=f"These are topics from {bucket_name} YouTube channels")
+
+        if new_clusters.get("clusters"):
+            logger.info(f"AI created {len(new_clusters['clusters'])} clusters from new topics")
+
+            # Save new clusters and add to mapping
+            for cluster in new_clusters["clusters"]:
+                cluster_name = cluster["name"]
+                cluster_topics_list = cluster["topics"]
+
+                # Save cluster to database
+                cluster_id = save_cluster(cluster_name, cluster_topics_list, bucket_id=bucket_id)
+                if cluster_id:
+                    for topic in cluster_topics_list:
+                        cluster_to_topics[cluster_id].append(topic)
+    else:
+        logger.info(f"No new topics to cluster for '{bucket_name}'")
+
+    # Now calculate stats for ALL clusters (both existing and new)
     trends = []
+    active_cluster_ids = []
     period_end = datetime.now(timezone.utc)
     period_start = period_end - timedelta(days=Config.TREND_WINDOW_DAYS)
 
-    for cluster in clusters["clusters"]:
-        cluster_name = cluster["name"]
-        cluster_topics_list = cluster["topics"]
-
+    for cluster_id, topics_in_cluster in cluster_to_topics.items():
         # Gather all videos in this cluster
         videos_in_cluster = []
         seen_video_ids = set()
 
-        for topic in cluster_topics_list:
+        for topic in topics_in_cluster:
             for video_entry in topic_to_videos.get(topic, []):
                 vid = video_entry["video_id"]
                 if vid not in seen_video_ids:
@@ -119,11 +147,6 @@ def detect_trends_for_bucket(bucket: dict) -> list[dict]:
         unique_channels = set(v["channel_id"] for v in videos_in_cluster)
         channel_count = len(unique_channels)
 
-        # Check if meets threshold (2+ channels for bucket-level trends)
-        min_channels = max(2, min(Config.TREND_MIN_CHANNELS, len(channel_ids) // 2))
-        if channel_count < min_channels:
-            continue
-
         # Calculate stats
         video_count = len(videos_in_cluster)
         performances = [
@@ -134,22 +157,26 @@ def detect_trends_for_bucket(bucket: dict) -> list[dict]:
         avg_performance = round(sum(performances) / len(performances), 2) if performances else None
         video_ids = list(seen_video_ids)
 
-        # Save cluster to database (with bucket_id)
-        cluster_id = save_cluster(cluster_name, cluster_topics_list, bucket_id=bucket_id)
+        # Upsert the trending topic (update if exists, create if new)
+        upsert_trending_topic(
+            cluster_id=cluster_id,
+            bucket_id=bucket_id,
+            channel_count=channel_count,
+            video_count=video_count,
+            avg_performance=avg_performance,
+            video_ids=video_ids,
+            period_start=period_start,
+            period_end=period_end,
+        )
 
-        if cluster_id:
-            # Save as trending topic
-            save_trending_topic(
-                cluster_id=cluster_id,
-                channel_count=channel_count,
-                video_count=video_count,
-                avg_performance=avg_performance,
-                video_ids=video_ids,
-                period_start=period_start,
-                period_end=period_end,
-                bucket_id=bucket_id,
-            )
+        active_cluster_ids.append(cluster_id)
 
+        # Get cluster name for logging
+        cluster_name = get_cluster_name(cluster_id) or "unknown"
+
+        # Only report as trend if meets threshold
+        min_channels = max(2, min(Config.TREND_MIN_CHANNELS, len(channel_ids) // 2))
+        if channel_count >= min_channels:
             trend = {
                 "bucket_id": bucket_id,
                 "bucket_name": bucket_name,
@@ -168,20 +195,23 @@ def detect_trends_for_bucket(bucket: dict) -> list[dict]:
                 f"{avg_performance}x avg performance"
             )
 
+    # Mark clusters not seen this run as inactive
+    mark_stale_trends_inactive(bucket_id, active_cluster_ids)
+
     return trends
 
 
 def detect_trends() -> list[dict]:
     """
     Run trend detection for all buckets.
+    Uses persistent clustering - trends are updated, not deleted.
 
     Returns:
         List of all detected trends across buckets.
     """
-    logger.info("Starting per-bucket trend detection...")
+    logger.info("Starting per-bucket trend detection (with persistence)...")
 
-    # Clear old trends first
-    clear_old_trends()
+    # No longer clear old trends - we update them instead
 
     # Get all buckets
     buckets = get_all_buckets()

@@ -120,6 +120,8 @@ export interface TrendingTopic {
   detected_at: string;
   period_start: string;
   period_end: string;
+  status: "active" | "fading" | "inactive";
+  first_detected_at: string;
   topic_clusters?: TopicCluster;
 }
 

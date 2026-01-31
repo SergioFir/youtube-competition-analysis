@@ -42,12 +42,16 @@ def get_bucket_trending_keywords(bucket_id: str, limit: int = 5) -> list[str]:
             "channel_count", desc=True
         ).limit(limit).execute()
 
+        logger.info(f"Trending topics query for bucket {bucket_id}: {len(result.data)} results")
+        logger.debug(f"Raw result: {result.data}")
+
         keywords = []
         for row in result.data:
             cluster = row.get("topic_clusters")
             if cluster and cluster.get("normalized_name"):
                 keywords.append(cluster["normalized_name"])
 
+        logger.info(f"Extracted keywords: {keywords}")
         return keywords
 
     except Exception as e:

@@ -315,12 +315,186 @@ def get_trending_topics(limit: int = 20) -> list[dict]:
     client = get_client()
 
     try:
-        # Get latest trending topics
+        # Get latest trending topics (active and fading only)
         result = client.table("trending_topics").select(
             "*, topic_clusters(normalized_name)"
-        ).order("detected_at", desc=True).limit(limit).execute()
+        ).in_("status", ["active", "fading"]).order("channel_count", desc=True).limit(limit).execute()
 
         return result.data
     except Exception as e:
         logger.error(f"Error getting trending topics: {e}")
         return []
+
+
+def get_existing_topic_clusters(bucket_id: str) -> dict[str, str]:
+    """
+    Get mapping of raw topics to their cluster IDs for a bucket.
+
+    Args:
+        bucket_id: The bucket ID to get clusters for
+
+    Returns:
+        Dict mapping topic string -> cluster_id
+    """
+    client = get_client()
+
+    try:
+        # Get all clusters for this bucket
+        clusters_result = client.table("topic_clusters").select(
+            "id"
+        ).eq("bucket_id", bucket_id).execute()
+
+        if not clusters_result.data:
+            return {}
+
+        cluster_ids = [c["id"] for c in clusters_result.data]
+
+        # Get all topics for these clusters
+        topics_result = client.table("cluster_topics").select(
+            "topic, cluster_id"
+        ).in_("cluster_id", cluster_ids).execute()
+
+        return {row["topic"]: row["cluster_id"] for row in topics_result.data}
+    except Exception as e:
+        logger.error(f"Error getting existing topic clusters: {e}")
+        return {}
+
+
+def get_cluster_name(cluster_id: str) -> Optional[str]:
+    """Get the normalized name for a cluster."""
+    client = get_client()
+
+    try:
+        result = client.table("topic_clusters").select(
+            "normalized_name"
+        ).eq("id", cluster_id).limit(1).execute()
+
+        if result.data:
+            return result.data[0]["normalized_name"]
+        return None
+    except Exception as e:
+        logger.error(f"Error getting cluster name: {e}")
+        return None
+
+
+def upsert_trending_topic(
+    cluster_id: str,
+    bucket_id: str,
+    channel_count: int,
+    video_count: int,
+    avg_performance: Optional[float],
+    video_ids: list[str],
+    period_start: datetime,
+    period_end: datetime,
+) -> bool:
+    """
+    Update existing trend or create new one.
+    Sets status based on channel_count.
+
+    Args:
+        cluster_id: The cluster this trend belongs to
+        bucket_id: The bucket this trend belongs to
+        channel_count: Number of unique channels
+        video_count: Number of videos
+        avg_performance: Average performance ratio
+        video_ids: List of video IDs
+        period_start: Start of lookback period
+        period_end: End of lookback period
+
+    Returns:
+        True if successful
+    """
+    client = get_client()
+
+    # Determine status based on channel count
+    if channel_count >= 2:
+        status = "active"
+    elif channel_count == 1:
+        status = "fading"
+    else:
+        status = "inactive"
+
+    try:
+        # Try to find existing trend for this cluster+bucket
+        existing = client.table("trending_topics").select(
+            "id, first_detected_at"
+        ).eq("cluster_id", cluster_id).eq("bucket_id", bucket_id).limit(1).execute()
+
+        if existing.data:
+            # Update existing trend
+            trend_id = existing.data[0]["id"]
+            client.table("trending_topics").update({
+                "channel_count": channel_count,
+                "video_count": video_count,
+                "avg_performance": avg_performance,
+                "video_ids": video_ids,
+                "period_start": period_start.isoformat(),
+                "period_end": period_end.isoformat(),
+                "status": status,
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", trend_id).execute()
+            logger.debug(f"Updated trend {trend_id} with status={status}")
+        else:
+            # Create new trend
+            client.table("trending_topics").insert({
+                "cluster_id": cluster_id,
+                "bucket_id": bucket_id,
+                "channel_count": channel_count,
+                "video_count": video_count,
+                "avg_performance": avg_performance,
+                "video_ids": video_ids,
+                "period_start": period_start.isoformat(),
+                "period_end": period_end.isoformat(),
+                "status": status,
+                "first_detected_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+            logger.debug(f"Created new trend for cluster {cluster_id}")
+
+        return True
+    except Exception as e:
+        logger.error(f"Error upserting trending topic: {e}")
+        return False
+
+
+def mark_stale_trends_inactive(bucket_id: str, active_cluster_ids: list[str]) -> int:
+    """
+    Mark trends as inactive if their cluster wasn't updated this run.
+
+    Args:
+        bucket_id: The bucket to update
+        active_cluster_ids: List of cluster IDs that are still active
+
+    Returns:
+        Number of trends marked inactive
+    """
+    client = get_client()
+
+    try:
+        # Get all active/fading trends for this bucket
+        result = client.table("trending_topics").select(
+            "id, cluster_id"
+        ).eq("bucket_id", bucket_id).in_("status", ["active", "fading"]).execute()
+
+        if not result.data:
+            return 0
+
+        # Find trends whose clusters weren't in this run
+        stale_ids = [
+            row["id"] for row in result.data
+            if row["cluster_id"] not in active_cluster_ids
+        ]
+
+        if not stale_ids:
+            return 0
+
+        # Mark them inactive
+        client.table("trending_topics").update({
+            "status": "inactive",
+            "detected_at": datetime.now(timezone.utc).isoformat(),
+        }).in_("id", stale_ids).execute()
+
+        logger.info(f"Marked {len(stale_ids)} stale trends as inactive")
+        return len(stale_ids)
+    except Exception as e:
+        logger.error(f"Error marking stale trends inactive: {e}")
+        return 0

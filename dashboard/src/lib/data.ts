@@ -237,7 +237,8 @@ export async function getTrendingTopics(): Promise<TrendingTopic[]> {
       *,
       topic_clusters(*)
     `)
-    .order("detected_at", { ascending: false })
+    .in("status", ["active", "fading"])
+    .order("channel_count", { ascending: false })
     .limit(50);
 
   if (error) {
@@ -249,31 +250,14 @@ export async function getTrendingTopics(): Promise<TrendingTopic[]> {
 }
 
 export async function getLatestTrendingTopics(): Promise<TrendingTopic[]> {
-  // Get only the most recent detection run
-  const { data: latestRun, error: latestError } = await supabase
-    .from("trending_topics")
-    .select("detected_at")
-    .order("detected_at", { ascending: false })
-    .limit(1)
-    .single();
-
-  if (latestError || !latestRun) {
-    // No trends yet or error
-    if (latestError?.code !== "PGRST116") {
-      console.error("Error fetching latest trend run:", latestError);
-    }
-    return [];
-  }
-
-  const detectedAt = (latestRun as { detected_at: string }).detected_at;
-
+  // With persistence, we just get active/fading trends
   const { data, error } = await supabase
     .from("trending_topics")
     .select(`
       *,
       topic_clusters(*)
     `)
-    .eq("detected_at", detectedAt)
+    .in("status", ["active", "fading"])
     .order("channel_count", { ascending: false });
 
   if (error) {
@@ -355,6 +339,7 @@ export async function getTrendsForBucket(bucketId: string): Promise<TrendingTopi
       topic_clusters(*)
     `)
     .eq("bucket_id", bucketId)
+    .in("status", ["active", "fading"])
     .order("channel_count", { ascending: false });
 
   if (error) {

@@ -19,7 +19,23 @@ Topics:
 Rules:
 1. Group similar topics together
 2. Cluster name: 2-5 lowercase words
-3. Include ALL topics (even unique ones as single-item clusters)
+3. BE SPECIFIC - use actual tool names, product names, or specific techniques
+4. AVOID generic names like "ai automation", "ai tools", "productivity tips", "tutorials"
+5. Include ALL topics (even unique ones as single-item clusters)
+
+Examples of GOOD cluster names:
+- "clawdbot setup tutorials"
+- "gemini whisk workflows"
+- "antigravity agent building"
+- "notebooklm features"
+- "claude code tips"
+
+Examples of BAD cluster names (TOO GENERIC - never use these):
+- "ai automation"
+- "ai tools"
+- "productivity"
+- "tutorials"
+- "google updates"
 
 Return ONLY this JSON format, nothing else:
 {{"clusters":[{{"name":"example name","topics":["topic1","topic2"]}}]}}"""
