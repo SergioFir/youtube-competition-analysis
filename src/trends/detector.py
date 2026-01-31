@@ -157,26 +157,26 @@ def detect_trends_for_bucket(bucket: dict) -> list[dict]:
         avg_performance = round(sum(performances) / len(performances), 2) if performances else None
         video_ids = list(seen_video_ids)
 
-        # Upsert the trending topic (update if exists, create if new)
-        upsert_trending_topic(
-            cluster_id=cluster_id,
-            bucket_id=bucket_id,
-            channel_count=channel_count,
-            video_count=video_count,
-            avg_performance=avg_performance,
-            video_ids=video_ids,
-            period_start=period_start,
-            period_end=period_end,
-        )
+        # Only save as trend if meets minimum channel threshold
+        min_channels = max(3, min(Config.TREND_MIN_CHANNELS, len(channel_ids) // 2))
 
-        active_cluster_ids.append(cluster_id)
-
-        # Get cluster name for logging
-        cluster_name = get_cluster_name(cluster_id) or "unknown"
-
-        # Only report as trend if meets threshold
-        min_channels = max(2, min(Config.TREND_MIN_CHANNELS, len(channel_ids) // 2))
         if channel_count >= min_channels:
+            # Upsert the trending topic (update if exists, create if new)
+            upsert_trending_topic(
+                cluster_id=cluster_id,
+                bucket_id=bucket_id,
+                channel_count=channel_count,
+                video_count=video_count,
+                avg_performance=avg_performance,
+                video_ids=video_ids,
+                period_start=period_start,
+                period_end=period_end,
+            )
+            active_cluster_ids.append(cluster_id)
+
+            # Get cluster name for logging
+            cluster_name = get_cluster_name(cluster_id) or "unknown"
+
             trend = {
                 "bucket_id": bucket_id,
                 "bucket_name": bucket_name,

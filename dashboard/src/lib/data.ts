@@ -237,7 +237,7 @@ export async function getTrendingTopics(): Promise<TrendingTopic[]> {
       *,
       topic_clusters(*)
     `)
-    .in("status", ["active", "fading"])
+    .eq("status", "active")
     .order("channel_count", { ascending: false })
     .limit(50);
 
@@ -250,14 +250,14 @@ export async function getTrendingTopics(): Promise<TrendingTopic[]> {
 }
 
 export async function getLatestTrendingTopics(): Promise<TrendingTopic[]> {
-  // With persistence, we just get active/fading trends
+  // Only get active trends (2+ channels)
   const { data, error } = await supabase
     .from("trending_topics")
     .select(`
       *,
       topic_clusters(*)
     `)
-    .in("status", ["active", "fading"])
+    .eq("status", "active")
     .order("channel_count", { ascending: false });
 
   if (error) {
@@ -339,7 +339,7 @@ export async function getTrendsForBucket(bucketId: string): Promise<TrendingTopi
       topic_clusters(*)
     `)
     .eq("bucket_id", bucketId)
-    .in("status", ["active", "fading"])
+    .eq("status", "active")
     .order("channel_count", { ascending: false });
 
   if (error) {

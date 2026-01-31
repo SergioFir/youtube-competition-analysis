@@ -41,9 +41,13 @@ Return ONLY this JSON format, nothing else:
 {{"clusters":[{{"name":"example name","topics":["topic1","topic2"]}}]}}"""
 
 
+BATCH_SIZE = 50  # Max topics per AI call
+
+
 def cluster_topics(topics: list[str], context: str = "") -> dict:
     """
     Group similar topics into clusters using AI.
+    Batches large topic sets to avoid overwhelming the model.
 
     Args:
         topics: List of raw topic strings
@@ -63,6 +67,10 @@ def cluster_topics(topics: list[str], context: str = "") -> dict:
         if unique_topics:
             return {"clusters": [{"name": unique_topics[0], "topics": unique_topics}]}
         return {"clusters": []}
+
+    # If more than BATCH_SIZE topics, process in batches then merge
+    if len(unique_topics) > BATCH_SIZE:
+        return _cluster_in_batches(unique_topics, context)
 
     import json
     import re
@@ -154,3 +162,51 @@ def cluster_topics(topics: list[str], context: str = "") -> dict:
         return {
             "clusters": [{"name": t, "topics": [t]} for t in unique_topics]
         }
+
+
+def _cluster_in_batches(topics: list[str], context: str) -> dict:
+    """
+    Cluster topics in batches, then merge similar clusters.
+
+    Args:
+        topics: List of topic strings (already deduplicated)
+        context: Context string for the AI
+
+    Returns:
+        Dict with merged clusters.
+    """
+    logger.info(f"Clustering {len(topics)} topics in batches of {BATCH_SIZE}...")
+
+    # Split into batches
+    batches = [topics[i:i + BATCH_SIZE] for i in range(0, len(topics), BATCH_SIZE)]
+    logger.info(f"Split into {len(batches)} batches")
+
+    # Cluster each batch
+    all_clusters = []
+    for i, batch in enumerate(batches):
+        logger.info(f"Clustering batch {i + 1}/{len(batches)} ({len(batch)} topics)...")
+        result = cluster_topics(batch, context)  # Recursive call, but batch is ≤ BATCH_SIZE
+        all_clusters.extend(result.get("clusters", []))
+
+    # Merge clusters with the same name
+    merged = {}
+    for cluster in all_clusters:
+        name = cluster.get("name", "").lower().strip()
+        if not name:
+            continue
+
+        if name in merged:
+            # Add topics to existing cluster
+            existing_topics = set(merged[name]["topics"])
+            for topic in cluster.get("topics", []):
+                existing_topics.add(topic)
+            merged[name]["topics"] = list(existing_topics)
+        else:
+            merged[name] = {
+                "name": name,
+                "topics": list(cluster.get("topics", []))
+            }
+
+    logger.info(f"Merged into {len(merged)} unique clusters")
+
+    return {"clusters": list(merged.values())}
